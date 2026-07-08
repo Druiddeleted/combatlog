@@ -53,6 +53,10 @@ function startCommandLoop() {
                 case 'set-report-code':
                     respond({ ok: true });
                     break;
+                case 'set-live-logging-start-time':
+                    liveLoggingStartTime = cmd.startTime;
+                    respond({ ok: true });
+                    break;
                 case 'parse-lines':
                     for (let i = 0; i < cmd.lines.length; i++) {
                         parsedLineCount++;
@@ -79,6 +83,16 @@ function startCommandLoop() {
                     }));
                     respond({ ok: true, logVersion, gameVersion, mythic, startTime, endTime, fights });
                     break;
+                case 'collect-in-progress-fight': {
+                    // non-destructive read of the events accumulated since the last pushLogFight;
+                    // they stay buffered and are re-sent when the fight completes (the server
+                    // reconciles via inProgressEventCount and a non-advancing segmentId)
+                    const inProgress = lastAssignedEventID > currentEventIndex
+                        ? [{ eventCount: lastAssignedEventID - currentEventIndex, eventsString }]
+                        : [];
+                    respond({ ok: true, logVersion, gameVersion, mythic, startTime, endTime, fights: inProgress });
+                    break;
+                }
                 case 'collect-master-info':
                     buildActorsString();
                     if (typeof buildAbilitiesStringIfNeeded === 'function')

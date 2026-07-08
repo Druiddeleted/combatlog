@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod live;
 mod parser;
 mod wcl;
 
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context as _, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager as _};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 
@@ -106,17 +107,90 @@ async fn start_upload(app: AppHandle, args: UploadArgs) -> Result<(), String> {
     Ok(())
 }
 
+/// sender is `Some` while a live log session is running (it is the stop signal);
+/// the generation counter stops a finished task from clearing a newer session's slot.
+#[derive(Default)]
+struct LiveLogState(std::sync::Mutex<(u64, Option<tokio::sync::watch::Sender<bool>>)>);
+
+/// native folder picker for the live log directory.
+#[tauri::command]
+async fn pick_log_directory(app: AppHandle) -> Option<FileInfo> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |path| {
+        let _ = tx.send(path);
+    });
+    let path = rx.await.ok().flatten()?;
+    let pb = path.as_path()?.to_path_buf();
+    Some(describe_file(&pb))
+}
+
+/// dir info for a user-dropped path
+#[tauri::command]
+fn dir_info(path: String) -> Result<FileInfo, String> {
+    let pb = std::path::PathBuf::from(&path);
+    if !pb.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    Ok(describe_file(&pb))
+}
+
+/// start live logging; rejected while a session is already running.
+#[tauri::command]
+async fn start_live_log(
+    app: AppHandle,
+    state: tauri::State<'_, LiveLogState>,
+    args: live::LiveLogArgs,
+) -> Result<(), String> {
+    let (rx, my_gen) = {
+        let mut guard = state.0.lock().unwrap();
+        if guard.1.as_ref().map(|tx| !tx.is_closed()).unwrap_or(false) {
+            return Err("live log already running".into());
+        }
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        guard.0 += 1;
+        guard.1 = Some(tx);
+        (rx, guard.0)
+    };
+    tokio::spawn(async move {
+        if let Err(e) = live::run_live_log(app.clone(), args, rx).await {
+            let _ = app.emit("live:error", json!({"message": format!("{e:#}")}));
+        }
+        let state = app.state::<LiveLogState>();
+        let mut guard = state.0.lock().unwrap();
+        if guard.0 == my_gen {
+            guard.1 = None;
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+fn stop_live_log(state: tauri::State<'_, LiveLogState>) -> Result<(), String> {
+    match state.0.lock().unwrap().1.take() {
+        Some(tx) => {
+            let _ = tx.send(true);
+            Ok(())
+        }
+        None => Err("no live log running".into()),
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(LiveLogState::default())
         .invoke_handler(tauri::generate_handler![
             app_version,
             pick_log_file,
             file_info,
             open_url,
-            start_upload
+            start_upload,
+            pick_log_directory,
+            dir_info,
+            start_live_log,
+            stop_live_log
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -203,7 +277,7 @@ async fn run_upload(app: &AppHandle, args: UploadArgs) -> Result<()> {
             + (80 * batch_num as u32 / total_batches.max(1) as u32);
 
         parser.parse_lines(&chunk.to_vec(), args.region).await?;
-        let fd = parser.collect_fights().await?;
+        let fd = parser.collect_fights(true).await?;
         let fights = fd.get("fights").and_then(|v| v.as_array());
         if fights.map(|a| a.is_empty()).unwrap_or(true) {
             emit_progress(
@@ -240,18 +314,13 @@ async fn run_upload(app: &AppHandle, args: UploadArgs) -> Result<()> {
         let code = report_code.as_deref().unwrap();
 
         let mi = parser.collect_master_info().await?;
-        let master_ids = (
-            mi.get("lastAssignedActorID").and_then(|v| v.as_i64()).unwrap_or(0),
-            mi.get("lastAssignedAbilityID").and_then(|v| v.as_i64()).unwrap_or(0),
-            mi.get("lastAssignedTupleID").and_then(|v| v.as_i64()).unwrap_or(0),
-            mi.get("lastAssignedPetID").and_then(|v| v.as_i64()).unwrap_or(0),
-        );
+        let master_ids = wcl::master_ids(&mi);
         if Some(master_ids) != last_master_ids {
             let log_version = fd.get("logVersion").and_then(|v| v.as_i64()).unwrap_or(0);
             let game_version = fd.get("gameVersion").and_then(|v| v.as_i64()).unwrap_or(0);
             let master = wcl::build_master_string(&mi, log_version, game_version);
             let zipped = wcl::make_zip(&master)?;
-            session.set_master_table(code, segment_id, zipped).await?;
+            session.set_master_table(code, segment_id, false, zipped).await?;
             last_master_ids = Some(master_ids);
         }
 
@@ -268,9 +337,10 @@ async fn run_upload(app: &AppHandle, args: UploadArgs) -> Result<()> {
 
         let fights_str = wcl::build_fights_string(&fd);
         let zipped = wcl::make_zip(&fights_str)?;
-        segment_id = session
-            .add_segment(code, segment_id, start_time, end_time, mythic, zipped)
+        let next = session
+            .add_segment(code, segment_id, start_time, end_time, mythic, false, false, 0, zipped)
             .await?;
+        segment_id = if next > 0 { next } else { segment_id + 1 };
         parser.clear_fights().await?;
         emit_progress(
             app,

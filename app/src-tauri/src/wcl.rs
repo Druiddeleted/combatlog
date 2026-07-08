@@ -4,7 +4,7 @@
 use std::io::{Cursor, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context as _, Result};
+use anyhow::{anyhow, Context as _, Result};
 use rand::Rng;
 use regex::Regex;
 use rquest::{Client, Impersonate};
@@ -19,6 +19,19 @@ const CHROME_VERSION: &str = "134.0.6998.205";
 const ELECTRON_VERSION: &str = "37.7.0";
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// typed HTTP error status, so callers can match on the code
+/// (e.g. re-login on 401) instead of parsing the message.
+#[derive(Debug)]
+pub struct HttpStatus(pub u16);
+
+impl std::fmt::Display for HttpStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "HTTP {}", self.0)
+    }
+}
+
+impl std::error::Error for HttpStatus {}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginUser {
@@ -86,7 +99,8 @@ impl WclSession {
                         continue;
                     }
                     let body = r.text().await.unwrap_or_default();
-                    bail!("HTTP {s}: {}", truncate(&body, 500));
+                    return Err(anyhow::Error::new(HttpStatus(s))
+                        .context(format!("HTTP {s}: {}", truncate(&body, 500))));
                 }
                 Err(e) => {
                     if attempt < MAX_RETRIES {
@@ -202,10 +216,14 @@ impl WclSession {
         &self,
         code: &str,
         segment_id: i64,
+        is_real_time: bool,
         zip_bytes: Vec<u8>,
     ) -> Result<()> {
         let (boundary, body) = build_multipart(
-            &[("segmentId", &segment_id.to_string()), ("isRealTime", "false")],
+            &[
+                ("segmentId", &segment_id.to_string()),
+                ("isRealTime", if is_real_time { "true" } else { "false" }),
+            ],
             &[("logfile", "blob", "application/zip", zip_bytes)],
         );
         self.send_with_retry(
@@ -227,15 +245,18 @@ impl WclSession {
         start_time: i64,
         end_time: i64,
         mythic: i32,
+        is_live_log: bool,
+        is_real_time: bool,
+        in_progress_event_count: i64,
         zip_bytes: Vec<u8>,
     ) -> Result<i64> {
         let parameters = json!({
             "startTime": start_time,
             "endTime": end_time,
             "mythic": mythic,
-            "isLiveLog": false,
-            "isRealTime": false,
-            "inProgressEventCount": 0,
+            "isLiveLog": is_live_log,
+            "isRealTime": is_real_time,
+            "inProgressEventCount": in_progress_event_count,
             "segmentId": segment_id,
         });
         let (boundary, body) = build_multipart(
@@ -256,9 +277,8 @@ impl WclSession {
             )
             .await?;
         let v: Value = resp.json().await?;
-        Ok(v.get("nextSegmentId")
-            .and_then(|n| n.as_i64())
-            .unwrap_or(segment_id + 1))
+        // 0 means "don't advance" (in-progress live segments get overwritten in place)
+        Ok(v.get("nextSegmentId").and_then(|n| n.as_i64()).unwrap_or(0))
     }
 
     pub async fn terminate_report(&self, code: &str) -> Result<()> {
@@ -350,6 +370,16 @@ pub fn make_zip(content: &str) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
+
+/// the master-table fingerprint: upload a new table only when these change.
+pub fn master_ids(m: &Value) -> (i64, i64, i64, i64) {
+    (
+        m.get("lastAssignedActorID").and_then(|v| v.as_i64()).unwrap_or(0),
+        m.get("lastAssignedAbilityID").and_then(|v| v.as_i64()).unwrap_or(0),
+        m.get("lastAssignedTupleID").and_then(|v| v.as_i64()).unwrap_or(0),
+        m.get("lastAssignedPetID").and_then(|v| v.as_i64()).unwrap_or(0),
+    )
+}
 
 pub fn build_master_string(m: &Value, log_version: i64, game_version: i64) -> String {
     let mut parts = vec![format!("{log_version}|{game_version}|")];

@@ -139,6 +139,66 @@
   [data-theme="dark"]  .theme-toggle-icon.sun  { opacity: .3; }
   [data-theme="dark"]  .theme-toggle-icon.moon { opacity: .9; }
 
+  .mode-switch {
+    display: none; gap: 0; margin-bottom: 20px;
+    border: 1px solid var(--border); border-radius: 3px; overflow: hidden;
+  }
+  .mode-switch.visible { display: flex; }
+  .mode-switch button {
+    flex: 1; padding: 9px 0;
+    border: none; background: transparent; color: var(--text-dim);
+    font-family: 'Lexend', sans-serif; font-size: .78rem; font-weight: 500;
+    letter-spacing: .04em; cursor: pointer; transition: all .2s;
+  }
+  .mode-switch button.active {
+    background: var(--accent); color: #fff;
+  }
+  .mode-switch button:disabled { opacity: .5; cursor: not-allowed; }
+
+  .field label.checkline {
+    display: flex; align-items: center; gap: 8px;
+    margin: 10px 0 0; cursor: pointer; user-select: none;
+    text-transform: none; letter-spacing: 0;
+  }
+  .field .checkline input[type="checkbox"] {
+    -webkit-appearance: auto; appearance: auto;
+    width: 14px; height: 14px; padding: 0; flex-shrink: 0;
+    accent-color: var(--accent); cursor: pointer; margin: 0;
+  }
+  .checkline span { font-size: .78rem; color: var(--text); font-weight: 300; }
+
+  #liveStatus {
+    display: none; margin-bottom: 10px;
+    padding: 10px 12px; border: 1px solid var(--border); border-radius: 3px;
+    background: var(--accent-tint);
+    font-size: .75rem; line-height: 1.7;
+  }
+  #liveStatus .live-row { display: flex; justify-content: space-between; gap: 10px; }
+  #liveStatus .live-label {
+    color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: .06em; font-size: .65rem; font-weight: 500;
+  }
+  #liveStatus .live-value {
+    font-family: 'Fira Code', monospace; color: var(--text-bright);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  @keyframes livePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .35; }
+  }
+  .live-badge {
+    display: inline-block; padding: 1px 8px; border-radius: 8px;
+    font-size: .65rem; font-weight: 500; letter-spacing: .05em; text-transform: uppercase;
+    border: 1px solid var(--border); color: var(--text-dim);
+  }
+  .live-badge.tailing, .live-badge.uploading {
+    border-color: var(--success-border); color: var(--success); animation: livePulse 2s ease-in-out infinite;
+  }
+  .live-badge.fight {
+    border-color: var(--accent); color: var(--accent); animation: livePulse 1s ease-in-out infinite;
+  }
+  .live-badge.retrying { border-color: var(--error-border); color: var(--error); }
+
   .field { margin-bottom: 16px; }
   .field label {
     display: block; font-size: .7rem; font-weight: 500;
@@ -339,6 +399,11 @@
         </div>
       </div>
 
+      <div class="mode-switch" id="modeSwitch">
+        <button type="button" id="modeUpload" class="active">Upload Log</button>
+        <button type="button" id="modeLive">Live Log</button>
+      </div>
+
       <div class="row field">
         <div class="field">
           <label for="region">Region</label>
@@ -360,7 +425,7 @@
         </div>
       </div>
 
-      <div class="field">
+      <div class="field" id="uploadFields">
         <label>Combat Log</label>
         <div class="dropzone" id="dropzone">
           <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -378,17 +443,43 @@
         </div>
       </div>
 
+      <div class="field" id="liveFields" style="display:none">
+        <label>Log Directory</label>
+        <div class="dropzone" id="liveDropzone">
+          <svg class="dropzone-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"/>
+          </svg>
+          <div class="dropzone-text">
+            Drop your <strong>Logs</strong> folder here<br>or click to browse
+          </div>
+          <div class="fileinfo" id="liveDirInfo"></div>
+        </div>
+        <label class="checkline">
+          <input type="checkbox" id="includeExisting">
+          <span>Include existing file contents in the report</span>
+        </label>
+        <label class="checkline">
+          <input type="checkbox" id="realTime" checked>
+          <span>Real-time uploading (upload fights while in progress)</span>
+        </label>
+      </div>
+
       <button type="submit" id="btn" class="btn">Upload Log</button>
     </form>
 
     <div id="progress">
-      <div class="bar-track"><div class="bar-fill" id="bar"></div></div>
+      <div class="bar-track" id="barTrack"><div class="bar-fill" id="bar"></div></div>
+      <div id="liveStatus">
+        <div class="live-row"><span class="live-label">Status</span><span class="live-value" id="liveState"><span class="live-badge">waiting</span></span></div>
+        <div class="live-row"><span class="live-label">File</span><span class="live-value" id="liveFile">—</span></div>
+        <div class="live-row"><span class="live-label">Segments</span><span class="live-value" id="liveSegments">0</span></div>
+      </div>
       <div id="status"></div>
       <div id="log"></div>
     </div>
 
     <div id="result">
-      <div class="label">Upload complete</div>
+      <div class="label" id="resultLabel">Upload complete</div>
       <a id="report-link" href="#" target="_blank"></a>
       <button class="copy-btn" id="copyBtn" type="button">Copy URL</button>
     </div>
@@ -475,6 +566,60 @@ const dz = document.getElementById('dropzone');
 const fi = document.getElementById('logfile');
 const fileinfo = document.getElementById('fileinfo');
 
+// --- live log mode ---
+let mode = 'upload';
+let selectedDir = null;
+let liveRunning = false;
+const LIVE_KEY = 'wcl_live_settings';
+const liveDz = document.getElementById('liveDropzone');
+const liveDirInfo = document.getElementById('liveDirInfo');
+const includeExisting = document.getElementById('includeExisting');
+const realTime = document.getElementById('realTime');
+
+function setSelectedDir(info) {
+  selectedDir = info;
+  if (info) {
+    liveDz.classList.add('has-file');
+    liveDirInfo.textContent = info.path;
+  } else {
+    liveDz.classList.remove('has-file');
+    liveDirInfo.textContent = '';
+  }
+}
+
+function saveLiveSettings() {
+  localStorage.setItem(LIVE_KEY, JSON.stringify({
+    directory: selectedDir ? selectedDir.path : null,
+    includeExisting: includeExisting.checked,
+    realTime: realTime.checked,
+  }));
+}
+function loadLiveSettings() {
+  let d;
+  try { d = JSON.parse(localStorage.getItem(LIVE_KEY)) || {}; }
+  catch { d = {}; }
+  if (d.directory) setSelectedDir({ path: d.directory, name: d.directory, size: 0 });
+  if (typeof d.includeExisting === 'boolean') includeExisting.checked = d.includeExisting;
+  if (typeof d.realTime === 'boolean') realTime.checked = d.realTime;
+}
+
+function setMode(m) {
+  if (liveRunning) return;
+  mode = m;
+  document.getElementById('modeUpload').classList.toggle('active', m === 'upload');
+  document.getElementById('modeLive').classList.toggle('active', m === 'live');
+  document.getElementById('uploadFields').style.display = m === 'upload' ? 'block' : 'none';
+  document.getElementById('liveFields').style.display = m === 'live' ? 'block' : 'none';
+  btn.textContent = m === 'upload' ? 'Upload Log' : 'Start Live Logging';
+}
+
+if (isTauri) {
+  document.getElementById('modeSwitch').classList.add('visible');
+  document.getElementById('modeUpload').addEventListener('click', () => setMode('upload'));
+  document.getElementById('modeLive').addEventListener('click', () => setMode('live'));
+  loadLiveSettings();
+}
+
 function setSelected(info) {
   selected = info;
   if (info) {
@@ -491,21 +636,32 @@ if (isTauri) {
     const info = await invoke('pick_log_file');
     if (info) setSelected(info);
   });
+  liveDz.addEventListener('click', async () => {
+    const info = await invoke('pick_log_directory');
+    if (info) { setSelectedDir(info); saveLiveSettings(); }
+  });
   ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(ev =>
     window.addEventListener(ev, e => e.preventDefault())
   );
   getCurrentWebview().onDragDropEvent(async event => {
+    const zone = mode === 'live' ? liveDz : dz;
     if (event.payload.type === 'over' || event.payload.type === 'enter') {
-      dz.classList.add('dragover');
+      zone.classList.add('dragover');
     } else if (event.payload.type === 'leave') {
-      dz.classList.remove('dragover');
+      zone.classList.remove('dragover');
     } else if (event.payload.type === 'drop') {
-      dz.classList.remove('dragover');
+      zone.classList.remove('dragover');
       const paths = event.payload.paths || [];
       if (!paths.length) return;
       try {
-        const info = await invoke('file_info', { path: paths[0] });
-        setSelected(info);
+        if (mode === 'live') {
+          const info = await invoke('dir_info', { path: paths[0] });
+          setSelectedDir(info);
+          saveLiveSettings();
+        } else {
+          const info = await invoke('file_info', { path: paths[0] });
+          setSelected(info);
+        }
       } catch (err) {
         showError(String(err));
       }
@@ -555,10 +711,18 @@ function showError(m) {
   errMsg.textContent = m;
   errMsg.style.display = 'block';
 }
+function setModeSwitchEnabled(on) {
+  document.getElementById('modeUpload').disabled = !on;
+  document.getElementById('modeLive').disabled = !on;
+}
 function resetUI() {
   btn.disabled = true;
   btn.textContent = 'Uploading...';
+  setModeSwitchEnabled(false);
   prog.style.display = 'block';
+  document.getElementById('barTrack').style.display = 'block';
+  document.getElementById('liveStatus').style.display = 'none';
+  document.getElementById('resultLabel').textContent = 'Upload complete';
   resultEl.style.display = 'none';
   errMsg.style.display = 'none';
   logEl.textContent = '';
@@ -569,6 +733,7 @@ function resetUI() {
 function finishUI() {
   btn.disabled = false;
   btn.textContent = 'Upload Log';
+  setModeSwitchEnabled(true);
 }
 function showDone(url) {
   bar.style.width = '100%';
@@ -584,8 +749,110 @@ function showDone(url) {
 function handleProgress(d) {
   setBar(d.pct);
   statusEl.textContent = d.message;
-  logEl.textContent += d.message + '\n';
+  appendLog(d.message);
+}
+
+function appendLog(m) {
+  logEl.textContent += m + '\n';
   logEl.scrollTop = logEl.scrollHeight;
+}
+
+function setLiveBadge(state, inProgress) {
+  const el = document.getElementById('liveState');
+  let cls = '', text = state;
+  if (inProgress) { cls = 'fight'; text = 'fight in progress'; }
+  else if (state === 'tailing' || state === 'uploading') cls = state;
+  else if (state === 'retrying') cls = 'retrying';
+  el.innerHTML = '<span class="live-badge ' + cls + '">' + text + '</span>';
+}
+
+function resetLiveUI() {
+  btn.textContent = 'Stop Live Logging';
+  prog.style.display = 'block';
+  document.getElementById('barTrack').style.display = 'none';
+  document.getElementById('liveStatus').style.display = 'block';
+  resultEl.style.display = 'none';
+  errMsg.style.display = 'none';
+  logEl.textContent = '';
+  statusEl.textContent = '';
+  document.getElementById('liveFile').textContent = '—';
+  document.getElementById('liveSegments').textContent = '0';
+  setLiveBadge('waiting', false);
+}
+
+function finishLiveUI() {
+  liveRunning = false;
+  btn.disabled = false;
+  btn.textContent = 'Start Live Logging';
+  setModeSwitchEnabled(true);
+  setLiveBadge('stopped', false);
+}
+
+async function startLive() {
+  let unlisteners = [];
+  const cleanup = () => { unlisteners.forEach(fn => { try { fn(); } catch {} }); unlisteners = []; };
+  unlisteners.push(await listen('live:started', e => {
+    resultEl.style.display = 'block';
+    document.getElementById('resultLabel').textContent = 'Live report';
+    const link = document.getElementById('report-link');
+    link.href = e.payload.url;
+    link.textContent = e.payload.url;
+    link.onclick = ev => { ev.preventDefault(); openUrl(e.payload.url); };
+  }));
+  unlisteners.push(await listen('live:progress', e => {
+    const d = e.payload;
+    setLiveBadge(d.state, d.inProgress);
+    if (d.file) document.getElementById('liveFile').textContent = d.file;
+    document.getElementById('liveSegments').textContent = d.segments;
+    statusEl.textContent = d.message;
+    appendLog(d.message);
+  }));
+  unlisteners.push(await listen('live:done', e => {
+    document.getElementById('resultLabel').textContent = 'Live log complete';
+    appendLog('Live log ended — ' + e.payload.segments + ' segments uploaded');
+    finishLiveUI();
+    cleanup();
+  }));
+  unlisteners.push(await listen('live:error', e => {
+    showError(e.payload.message);
+    statusEl.textContent = 'Live log failed';
+    finishLiveUI();
+    cleanup();
+  }));
+
+  liveRunning = true;
+  setModeSwitchEnabled(false);
+  resetLiveUI();
+  try {
+    await invoke('start_live_log', {
+      args: {
+        directory: selectedDir.path,
+        email: document.getElementById('email').value,
+        password: document.getElementById('password').value,
+        region: parseInt(document.getElementById('region').value, 10),
+        visibility: parseInt(document.getElementById('visibility').value, 10),
+        guildId: null,
+        includeEntireFileInReport: includeExisting.checked,
+        enableRealTimeUploading: realTime.checked,
+      }
+    });
+  } catch (err) {
+    showError(String(err));
+    finishLiveUI();
+    cleanup();
+  }
+}
+
+async function stopLive() {
+  btn.disabled = true;
+  btn.textContent = 'Stopping...';
+  appendLog('Stopping live log...');
+  try {
+    await invoke('stop_live_log');
+  } catch (err) {
+    showError(String(err));
+    finishLiveUI();
+  }
 }
 
 async function tauriUpload() {
@@ -679,6 +946,19 @@ function webUpload() {
 
 document.getElementById('form').addEventListener('submit', async e => {
   e.preventDefault();
+  if (mode === 'live') {
+    if (liveRunning) { await stopLive(); return; }
+    if (!selectedDir) {
+      liveDz.style.borderColor = 'var(--error)';
+      setTimeout(() => liveDz.style.borderColor = '', 1000);
+      return;
+    }
+    saveCreds();
+    saveLiveSettings();
+    updateLoginUI();
+    await startLive();
+    return;
+  }
   if (!selected) {
     dz.style.borderColor = 'var(--error)';
     setTimeout(() => dz.style.borderColor = '', 1000);
