@@ -179,18 +179,56 @@ fn stop_live_log(state: tauri::State<'_, LiveLogState>) -> Result<(), String> {
 /// caption text/icon so the titlebar blends in (taskbar and alt-tab keep
 /// the app name and icon). Windows 11 only; silently a no-op elsewhere.
 #[cfg(windows)]
-fn apply_titlebar_colors(window: &tauri::WebviewWindow, dark: bool) {
+fn set_caption_color(window: &tauri::WebviewWindow, color: u32) {
     use windows_sys::Win32::Graphics::Dwm::{
         DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
     };
     let Ok(hwnd) = window.hwnd() else { return };
     let hwnd = hwnd.0 as *mut core::ffi::c_void;
-    // COLORREF is 0x00BBGGRR; matches the page --bg (light #f4f4f6, dark #101014)
-    let color: u32 = if dark { 0x0014_1010 } else { 0x00F6_F4F4 };
     unsafe {
         DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, &color as *const u32 as _, 4);
         DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR as u32, &color as *const u32 as _, 4);
     }
+}
+
+/// COLORREF (0x00BBGGRR) of the page --bg: light #f4f4f6, dark #101014.
+#[cfg(windows)]
+fn caption_color_for(dark: bool) -> u32 {
+    if dark { 0x0014_1010 } else { 0x00F6_F4F4 }
+}
+
+#[cfg(windows)]
+static CAPTION_STATE: std::sync::Mutex<(u32, u32)> = std::sync::Mutex::new((0, u32::MAX)); // (epoch, current color)
+
+/// fade the caption color over ~250ms to stay in step with the page's
+/// `transition: background .25s`.
+#[cfg(windows)]
+fn fade_caption_color(window: tauri::WebviewWindow, target: u32) {
+    let (epoch, start) = {
+        let mut s = CAPTION_STATE.lock().unwrap();
+        s.0 += 1;
+        let start = if s.1 == u32::MAX { target } else { s.1 };
+        s.1 = target;
+        (s.0, start)
+    };
+    if start == target {
+        set_caption_color(&window, target);
+        return;
+    }
+    tauri::async_runtime::spawn(async move {
+        const STEPS: u32 = 15;
+        let (sr, sg, sb) = (start & 0xFF, (start >> 8) & 0xFF, (start >> 16) & 0xFF);
+        let (tr, tg, tb) = (target & 0xFF, (target >> 8) & 0xFF, (target >> 16) & 0xFF);
+        for i in 1..=STEPS {
+            if CAPTION_STATE.lock().unwrap().0 != epoch {
+                return; // a newer fade superseded this one
+            }
+            let lerp = |a: u32, b: u32| (a as i64 + (b as i64 - a as i64) * i as i64 / STEPS as i64) as u32;
+            let c = lerp(sr, tr) | (lerp(sg, tg) << 8) | (lerp(sb, tb) << 16);
+            set_caption_color(&window, c);
+            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+        }
+    });
 }
 
 #[cfg(windows)]
@@ -222,7 +260,7 @@ fn strip_titlebar_icon(window: &tauri::WebviewWindow) {
 #[tauri::command]
 fn set_titlebar_theme(window: tauri::WebviewWindow, dark: bool) {
     #[cfg(windows)]
-    apply_titlebar_colors(&window, dark);
+    fade_caption_color(window, caption_color_for(dark));
     #[cfg(not(windows))]
     let _ = (window, dark);
 }
@@ -238,7 +276,9 @@ fn main() {
             if let Some(win) = app.get_webview_window("main") {
                 strip_titlebar_icon(&win);
                 let dark = matches!(win.theme(), Ok(tauri::Theme::Dark));
-                apply_titlebar_colors(&win, dark);
+                let color = caption_color_for(dark);
+                CAPTION_STATE.lock().unwrap().1 = color;
+                set_caption_color(&win, color);
             }
             let _ = app;
             Ok(())
