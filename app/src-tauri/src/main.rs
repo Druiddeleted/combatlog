@@ -107,8 +107,6 @@ async fn start_upload(app: AppHandle, args: UploadArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// sender is `Some` while a live log session is running (it is the stop signal);
-/// the generation counter stops a finished task from clearing a newer session's slot.
 #[derive(Default)]
 struct LiveLogState(std::sync::Mutex<(u64, Option<tokio::sync::watch::Sender<bool>>)>);
 
@@ -124,7 +122,7 @@ async fn pick_log_directory(app: AppHandle) -> Option<FileInfo> {
     Some(describe_file(&pb))
 }
 
-/// dir info for a user-dropped path
+/// dir info
 #[tauri::command]
 fn dir_info(path: String) -> Result<FileInfo, String> {
     let pb = std::path::PathBuf::from(&path);
@@ -134,7 +132,6 @@ fn dir_info(path: String) -> Result<FileInfo, String> {
     Ok(describe_file(&pb))
 }
 
-/// start live logging; rejected while a session is already running.
 #[tauri::command]
 async fn start_live_log(
     app: AppHandle,
@@ -175,9 +172,6 @@ fn stop_live_log(state: tauri::State<'_, LiveLogState>) -> Result<(), String> {
     }
 }
 
-/// paint the native caption bar in the page background color and hide the
-/// caption text/icon so the titlebar blends in (taskbar and alt-tab keep
-/// the app name and icon). Windows 11 only; silently a no-op elsewhere.
 #[cfg(windows)]
 fn set_caption_color(window: &tauri::WebviewWindow, color: u32) {
     use windows_sys::Win32::Graphics::Dwm::{
@@ -216,7 +210,7 @@ fn fade_caption_color(window: tauri::WebviewWindow, target: u32) {
         return;
     }
     tauri::async_runtime::spawn(async move {
-        const STEPS: u32 = 15;
+        const STEPS: u32 = 6;
         let (sr, sg, sb) = (start & 0xFF, (start >> 8) & 0xFF, (start >> 16) & 0xFF);
         let (tr, tg, tb) = (target & 0xFF, (target >> 8) & 0xFF, (target >> 16) & 0xFF);
         for i in 1..=STEPS {
@@ -256,7 +250,6 @@ fn strip_titlebar_icon(window: &tauri::WebviewWindow) {
     }
 }
 
-/// called by the frontend on load and whenever the theme toggles.
 #[tauri::command]
 fn set_titlebar_theme(window: tauri::WebviewWindow, dark: bool) {
     #[cfg(windows)]
