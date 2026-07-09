@@ -60,7 +60,16 @@
   }
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scrollbar-gutter: stable; overflow-y: scroll; }
+  html { scrollbar-gutter: stable; overflow-y: auto; background: var(--bg); }
+
+  ::-webkit-scrollbar { width: 10px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb {
+    background: var(--border); border-radius: 5px;
+    border: 3px solid var(--bg); background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); border: 3px solid var(--bg); background-clip: padding-box; }
+  ::-webkit-scrollbar-corner { background: var(--bg); }
 
   body {
     font-family: 'Lexend', sans-serif;
@@ -166,38 +175,6 @@
     accent-color: var(--accent); cursor: pointer; margin: 0;
   }
   .checkline span { font-size: .78rem; color: var(--text); font-weight: 300; }
-
-  #liveStatus {
-    display: none; margin-bottom: 10px;
-    padding: 10px 12px; border: 1px solid var(--border); border-radius: 3px;
-    background: var(--accent-tint);
-    font-size: .75rem; line-height: 1.7;
-  }
-  #liveStatus .live-row { display: flex; justify-content: space-between; gap: 10px; }
-  #liveStatus .live-label {
-    color: var(--text-dim); text-transform: uppercase;
-    letter-spacing: .06em; font-size: .65rem; font-weight: 500;
-  }
-  #liveStatus .live-value {
-    font-family: 'Fira Code', monospace; color: var(--text-bright);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  @keyframes livePulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .35; }
-  }
-  .live-badge {
-    display: inline-block; padding: 1px 8px; border-radius: 8px;
-    font-size: .65rem; font-weight: 500; letter-spacing: .05em; text-transform: uppercase;
-    border: 1px solid var(--border); color: var(--text-dim);
-  }
-  .live-badge.tailing, .live-badge.uploading {
-    border-color: var(--success-border); color: var(--success); animation: livePulse 2s ease-in-out infinite;
-  }
-  .live-badge.fight {
-    border-color: var(--accent); color: var(--accent); animation: livePulse 1s ease-in-out infinite;
-  }
-  .live-badge.retrying { border-color: var(--error-border); color: var(--error); }
 
   .field { margin-bottom: 16px; }
   .field label {
@@ -459,8 +436,8 @@
           <span>Include existing file contents in the report</span>
         </label>
         <label class="checkline">
-          <input type="checkbox" id="realTime" checked>
-          <span>Real-time uploading (upload fights while in progress)</span>
+          <input type="checkbox" id="fightEndOnly">
+          <span>Upload only when a fight ends</span>
         </label>
       </div>
 
@@ -469,11 +446,6 @@
 
     <div id="progress">
       <div class="bar-track" id="barTrack"><div class="bar-fill" id="bar"></div></div>
-      <div id="liveStatus">
-        <div class="live-row"><span class="live-label">Status</span><span class="live-value" id="liveState"><span class="live-badge">waiting</span></span></div>
-        <div class="live-row"><span class="live-label">File</span><span class="live-value" id="liveFile">—</span></div>
-        <div class="live-row"><span class="live-label">Segments</span><span class="live-value" id="liveSegments">0</span></div>
-      </div>
       <div id="status"></div>
       <div id="log"></div>
     </div>
@@ -502,6 +474,7 @@ const THEME_KEY = 'wcl_theme';
 function applyTheme(t) {
   document.documentElement.setAttribute('data-theme', t);
   localStorage.setItem(THEME_KEY, t);
+  if (isTauri) invoke('set_titlebar_theme', { dark: t === 'dark' }).catch(() => {});
 }
 const savedTheme = localStorage.getItem(THEME_KEY);
 if (savedTheme) applyTheme(savedTheme);
@@ -574,7 +547,7 @@ const LIVE_KEY = 'wcl_live_settings';
 const liveDz = document.getElementById('liveDropzone');
 const liveDirInfo = document.getElementById('liveDirInfo');
 const includeExisting = document.getElementById('includeExisting');
-const realTime = document.getElementById('realTime');
+const fightEndOnly = document.getElementById('fightEndOnly');
 
 function setSelectedDir(info) {
   selectedDir = info;
@@ -591,7 +564,7 @@ function saveLiveSettings() {
   localStorage.setItem(LIVE_KEY, JSON.stringify({
     directory: selectedDir ? selectedDir.path : null,
     includeExisting: includeExisting.checked,
-    realTime: realTime.checked,
+    fightEndOnly: fightEndOnly.checked,
   }));
 }
 function loadLiveSettings() {
@@ -600,7 +573,7 @@ function loadLiveSettings() {
   catch { d = {}; }
   if (d.directory) setSelectedDir({ path: d.directory, name: d.directory, size: 0 });
   if (typeof d.includeExisting === 'boolean') includeExisting.checked = d.includeExisting;
-  if (typeof d.realTime === 'boolean') realTime.checked = d.realTime;
+  if (typeof d.fightEndOnly === 'boolean') fightEndOnly.checked = d.fightEndOnly;
 }
 
 function setMode(m) {
@@ -721,7 +694,6 @@ function resetUI() {
   setModeSwitchEnabled(false);
   prog.style.display = 'block';
   document.getElementById('barTrack').style.display = 'block';
-  document.getElementById('liveStatus').style.display = 'none';
   document.getElementById('resultLabel').textContent = 'Upload complete';
   resultEl.style.display = 'none';
   errMsg.style.display = 'none';
@@ -757,27 +729,15 @@ function appendLog(m) {
   logEl.scrollTop = logEl.scrollHeight;
 }
 
-function setLiveBadge(state, inProgress) {
-  const el = document.getElementById('liveState');
-  let cls = '', text = state;
-  if (inProgress) { cls = 'fight'; text = 'fight in progress'; }
-  else if (state === 'tailing' || state === 'uploading') cls = state;
-  else if (state === 'retrying') cls = 'retrying';
-  el.innerHTML = '<span class="live-badge ' + cls + '">' + text + '</span>';
-}
-
 function resetLiveUI() {
+  btn.disabled = false;
   btn.textContent = 'Stop Live Logging';
   prog.style.display = 'block';
   document.getElementById('barTrack').style.display = 'none';
-  document.getElementById('liveStatus').style.display = 'block';
   resultEl.style.display = 'none';
   errMsg.style.display = 'none';
   logEl.textContent = '';
   statusEl.textContent = '';
-  document.getElementById('liveFile').textContent = '—';
-  document.getElementById('liveSegments').textContent = '0';
-  setLiveBadge('waiting', false);
 }
 
 function finishLiveUI() {
@@ -785,7 +745,6 @@ function finishLiveUI() {
   btn.disabled = false;
   btn.textContent = 'Start Live Logging';
   setModeSwitchEnabled(true);
-  setLiveBadge('stopped', false);
 }
 
 async function startLive() {
@@ -800,12 +759,8 @@ async function startLive() {
     link.onclick = ev => { ev.preventDefault(); openUrl(e.payload.url); };
   }));
   unlisteners.push(await listen('live:progress', e => {
-    const d = e.payload;
-    setLiveBadge(d.state, d.inProgress);
-    if (d.file) document.getElementById('liveFile').textContent = d.file;
-    document.getElementById('liveSegments').textContent = d.segments;
-    statusEl.textContent = d.message;
-    appendLog(d.message);
+    statusEl.textContent = e.payload.message;
+    appendLog(e.payload.message);
   }));
   unlisteners.push(await listen('live:done', e => {
     document.getElementById('resultLabel').textContent = 'Live log complete';
@@ -833,7 +788,7 @@ async function startLive() {
         visibility: parseInt(document.getElementById('visibility').value, 10),
         guildId: null,
         includeEntireFileInReport: includeExisting.checked,
-        enableRealTimeUploading: realTime.checked,
+        enableRealTimeUploading: !fightEndOnly.checked,
       }
     });
   } catch (err) {

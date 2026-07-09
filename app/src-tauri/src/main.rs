@@ -175,12 +175,74 @@ fn stop_live_log(state: tauri::State<'_, LiveLogState>) -> Result<(), String> {
     }
 }
 
+/// paint the native caption bar in the page background color and hide the
+/// caption text/icon so the titlebar blends in (taskbar and alt-tab keep
+/// the app name and icon). Windows 11 only; silently a no-op elsewhere.
+#[cfg(windows)]
+fn apply_titlebar_colors(window: &tauri::WebviewWindow, dark: bool) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    };
+    let Ok(hwnd) = window.hwnd() else { return };
+    let hwnd = hwnd.0 as *mut core::ffi::c_void;
+    // COLORREF is 0x00BBGGRR; matches the page --bg (light #f4f4f6, dark #101014)
+    let color: u32 = if dark { 0x0014_1010 } else { 0x00F6_F4F4 };
+    unsafe {
+        DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR as u32, &color as *const u32 as _, 4);
+        DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR as u32, &color as *const u32 as _, 4);
+    }
+}
+
+#[cfg(windows)]
+fn strip_titlebar_icon(window: &tauri::WebviewWindow) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SendMessageW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
+        ICON_SMALL, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WM_SETICON,
+        WS_EX_DLGMODALFRAME,
+    };
+    let Ok(hwnd) = window.hwnd() else { return };
+    let hwnd = hwnd.0 as *mut core::ffi::c_void;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_DLGMODALFRAME as isize);
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL as usize, 0);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        );
+    }
+}
+
+/// called by the frontend on load and whenever the theme toggles.
+#[tauri::command]
+fn set_titlebar_theme(window: tauri::WebviewWindow, dark: bool) {
+    #[cfg(windows)]
+    apply_titlebar_colors(&window, dark);
+    #[cfg(not(windows))]
+    let _ = (window, dark);
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .manage(LiveLogState::default())
+        .setup(|app| {
+            #[cfg(windows)]
+            if let Some(win) = app.get_webview_window("main") {
+                strip_titlebar_icon(&win);
+                let dark = matches!(win.theme(), Ok(tauri::Theme::Dark));
+                apply_titlebar_colors(&win, dark);
+            }
+            let _ = app;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             app_version,
             pick_log_file,
@@ -190,7 +252,8 @@ fn main() {
             pick_log_directory,
             dir_info,
             start_live_log,
-            stop_live_log
+            stop_live_log,
+            set_titlebar_theme
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
