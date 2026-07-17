@@ -29,6 +29,11 @@ pub struct LoginUser {
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginResponse {
     pub user: Option<LoginUser>,
+    /// Guild picker entries, a sibling of `user` in the login response. Shape is
+    /// left as raw JSON so a change on their side can't break login; `value` is
+    /// the guild id (-1 = "Personal Logs"), plus `label` and `regionId`.
+    #[serde(rename = "guildSelectItems", default)]
+    pub guild_select_items: Option<Vec<Value>>,
 }
 
 pub struct ParserBundle {

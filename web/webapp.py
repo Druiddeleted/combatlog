@@ -353,6 +353,32 @@ def index():
     return INDEX_HTML
 
 
+@app.route('/guilds', methods=['POST'])
+def guilds():
+    email = request.form.get('email', '')
+    password = request.form.get('password', '')
+    if not email or not password:
+        return json.dumps({'error': 'email and password required'}), 400, {'Content-Type': 'application/json'}
+    try:
+        session = WCLSession()
+        result = session.login(email, password)
+        user = result.get('user') or {}
+        items = result.get('guildSelectItems') or []
+        out = []
+        for it in items:
+            val = it.get('value')
+            if not isinstance(val, int):
+                continue
+            out.append({
+                'id': None if val < 0 else val,
+                'label': it.get('label') or '',
+                'regionId': it.get('regionId'),
+            })
+        return json.dumps({'userName': user.get('userName'), 'guilds': out}), 200, {'Content-Type': 'application/json'}
+    except Exception as e:
+        return json.dumps({'error': str(e)}), 500, {'Content-Type': 'application/json'}
+
+
 @app.route('/upload', methods=['POST'])
 def upload():
     f = request.files.get('logfile')

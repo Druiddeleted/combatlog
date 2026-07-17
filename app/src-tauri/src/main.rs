@@ -32,6 +32,23 @@ struct VersionInfo {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GuildOption {
+    /// Guild id, or `null` for "Personal Logs" (WCL sends -1).
+    id: Option<i64>,
+    label: String,
+    region_id: Option<i64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginResult {
+    /// WCL account name; `null` means the credentials were rejected.
+    user_name: Option<String>,
+    guilds: Vec<GuildOption>,
+}
+
+#[derive(Serialize)]
 struct FileInfo {
     path: String,
     name: String,
@@ -92,6 +109,35 @@ fn describe_file(path: &std::path::Path) -> FileInfo {
     }
 }
 
+#[tauri::command]
+async fn fetch_guilds(email: String, password: String) -> Result<LoginResult, String> {
+    let session = wcl::WclSession::new()
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let login = session
+        .login(&email, &password)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
+    let user_name = login.user.as_ref().and_then(|u| u.user_name.clone());
+    let items = login.guild_select_items.unwrap_or_default();
+    let guilds = items
+        .into_iter()
+        .filter_map(|it| {
+            let value = it.get("value").and_then(|v| v.as_i64())?;
+            Some(GuildOption {
+                id: if value < 0 { None } else { Some(value) },
+                label: it
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                region_id: it.get("regionId").and_then(|v| v.as_i64()),
+            })
+        })
+        .collect();
+    Ok(LoginResult { user_name, guilds })
+}
+
 /// start upload
 #[tauri::command]
 async fn start_upload(app: AppHandle, args: UploadArgs) -> Result<(), String> {
@@ -116,6 +162,7 @@ fn main() {
             pick_log_file,
             file_info,
             open_url,
+            fetch_guilds,
             start_upload
         ])
         .run(tauri::generate_context!())
