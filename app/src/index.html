@@ -163,6 +163,91 @@
         margin-top: 6px;
       }
 
+      /* Inline game picker embedded in the tagline. Reads as plain underlined
+         text with a small caret; opens a popover to switch RPGLogs sites. */
+      .game-picker {
+        position: relative;
+        display: inline-block;
+      }
+      .game-picker-btn {
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: inherit;
+        color: var(--text);
+        background: none;
+        border: none;
+        padding: 0 0 1px;
+        margin: 0;
+        cursor: pointer;
+        display: inline-flex;
+        align-items: baseline;
+        gap: 3px;
+        border-bottom: 1px solid var(--border);
+        transition:
+          color 0.15s,
+          border-color 0.15s;
+      }
+      .game-picker-btn:hover,
+      .game-picker.open .game-picker-btn {
+        color: var(--accent);
+        border-bottom-color: var(--accent);
+      }
+      .game-picker-arrow {
+        width: 7px;
+        height: 7px;
+        flex-shrink: 0;
+        transform: translateY(-1px);
+        transition: transform 0.2s;
+        opacity: 0.8;
+      }
+      .game-picker.open .game-picker-arrow {
+        transform: translateY(-1px) rotate(180deg);
+      }
+      .game-picker-menu {
+        position: absolute;
+        top: calc(100% + 8px);
+        /* Shift left by (border + inner padding) so item text lines up under the
+           subtitle word rather than being indented by the panel's padding. */
+        left: -11px;
+        transform: translateY(-4px);
+        z-index: 20;
+        padding: 5px 10px;
+        list-style: none;
+        text-align: left;
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        box-shadow: var(--shadow);
+        opacity: 0;
+        visibility: hidden;
+        pointer-events: none;
+        transition:
+          opacity 0.16s,
+          transform 0.16s,
+          visibility 0.16s;
+      }
+      .game-picker.open .game-picker-menu {
+        opacity: 1;
+        visibility: visible;
+        pointer-events: auto;
+        transform: translateY(0);
+      }
+      .game-picker-menu li {
+        display: block;
+        padding: 4px 0;
+        font: inherit;
+        letter-spacing: inherit;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        white-space: nowrap;
+        cursor: pointer;
+        transition: color 0.12s;
+      }
+      .game-picker-menu li:hover,
+      .game-picker-menu li[aria-selected="true"] {
+        color: var(--accent);
+      }
+
       .theme-toggle {
         position: fixed;
         top: 16px;
@@ -604,7 +689,38 @@
       <div class="card-body">
         <div class="header">
           <h1>combatlog<em>.dev</em></h1>
-          <div class="sub">a privacy conscious uploader for warcraftlogs</div>
+          <div class="sub">
+            a privacy conscious uploader for
+            <span class="game-picker" id="gamePicker">
+              <button
+                type="button"
+                class="game-picker-btn"
+                id="gamePickerBtn"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+              >
+                <span id="gamePickerLabel">WARCRAFT</span>
+                <svg
+                  class="game-picker-arrow"
+                  viewBox="0 0 10 6"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M1 1l4 4 4-4" />
+                </svg>
+              </button>
+              <ul
+                class="game-picker-menu"
+                id="gamePickerMenu"
+                role="listbox"
+                aria-label="Select game"
+              ></ul>
+            </span>
+          </div>
         </div>
 
         <form id="form" autocomplete="on">
@@ -696,8 +812,8 @@
                   <line x1="15" y1="15" x2="12" y2="12" />
                 </svg>
                 <div class="dropzone-text">
-                  Drop your <strong>WoWCombatLog</strong> here<br />or click to
-                  browse
+                  Drop your <strong id="dropHint">WoWCombatLog</strong> here<br />or
+                  click to browse
                 </div>
                 <div class="fileinfo" id="fileinfo"></div>
                 <input type="file" id="logfile" accept=".txt" />
@@ -749,6 +865,68 @@
           document.documentElement.getAttribute("data-theme") || "light";
         applyTheme(cur === "light" ? "dark" : "light");
       });
+
+      // ---- Games -------------------------------------------------------------
+      // Every RPGLogs site shares one upload mechanism; only the endpoints (a
+      // per-game `game` id sent to the backend) and the region set differ.
+      // Region codes: WoW + FFLogs are verified; ESO/SWTOR follow the platform
+      // pattern (1=Americas, 2=EU). ESO's PTS is omitted (its code is unknown).
+      const GAMES = {
+        warcraft: {
+          name: "WARCRAFT",
+          logHint: "WoWCombatLog",
+          regions: [
+            { v: "1", t: "US" },
+            { v: "2", t: "EU" },
+            { v: "3", t: "KR" },
+            { v: "4", t: "TW" },
+            { v: "5", t: "CN" },
+          ],
+          defaultRegion: "2",
+        },
+        ff: {
+          name: "FF14",
+          logHint: "FFXIV log",
+          regions: [
+            { v: "1", t: "NA" },
+            { v: "2", t: "EU" },
+            { v: "3", t: "JP" },
+            { v: "6", t: "OC" },
+          ],
+          defaultRegion: "1",
+        },
+        eso: {
+          name: "ESO",
+          logHint: "ESO log",
+          regions: [
+            { v: "1", t: "NA" },
+            { v: "2", t: "EU" },
+          ],
+          defaultRegion: "1",
+        },
+        swtor: {
+          name: "SWTOR",
+          logHint: "SWTOR log",
+          regions: [
+            { v: "1", t: "NA" },
+            { v: "2", t: "EU" },
+          ],
+          defaultRegion: "1",
+        },
+        fellowship: {
+          name: "FELLOWSHIP",
+          logHint: "Fellowship log",
+          regions: [
+            { v: "1", t: "NA" },
+            { v: "2", t: "EU" },
+          ],
+          defaultRegion: "1",
+        },
+      };
+      const GAME_ORDER = ["warcraft", "ff", "eso", "swtor", "fellowship"];
+      const GAME_KEY = "wcl_game";
+      let currentGame = localStorage.getItem(GAME_KEY);
+      if (!GAMES[currentGame]) currentGame = "warcraft";
 
       const STORE_KEY = "wcl_upload_creds";
       function readCreds() {
@@ -814,7 +992,8 @@
 
       const guildField = document.getElementById("guildField");
       const guildSel = document.getElementById("guild");
-      const GUILD_CACHE_PREFIX = "wcl_guilds_";
+      // Guild lists are per-site, so the cache key is scoped by game + email.
+      const guildCacheKey = (email) => "wcl_guilds_" + currentGame + "_" + email;
       let guildReqId = 0;
 
       function currentCreds() {
@@ -852,11 +1031,16 @@
 
       async function fetchGuilds(email, password) {
         if (isTauri) {
-          return await invoke("fetch_guilds", { email, password });
+          return await invoke("fetch_guilds", {
+            email,
+            password,
+            game: currentGame,
+          });
         }
         const fd = new FormData();
         fd.append("email", email);
         fd.append("password", password);
+        fd.append("game", currentGame);
         const resp = await fetch("/guilds", { method: "POST", body: fd });
         const data = await resp.json();
         if (!resp.ok) throw new Error(data.error || "Failed to log in");
@@ -870,7 +1054,7 @@
           return;
         }
 
-        const cacheKey = GUILD_CACHE_PREFIX + email;
+        const cacheKey = guildCacheKey(email);
         let cached = null;
         try {
           cached = JSON.parse(localStorage.getItem(cacheKey));
@@ -916,10 +1100,7 @@
             showLoginError("Login failed — check your email and password.");
             return;
           }
-          localStorage.setItem(
-            GUILD_CACHE_PREFIX + email,
-            JSON.stringify(guilds),
-          );
+          localStorage.setItem(guildCacheKey(email), JSON.stringify(guilds));
           saveCreds();
           updateLoginUI();
           if (reqId === guildReqId) populateGuilds(guilds);
@@ -953,7 +1134,88 @@
         if (rid) document.getElementById("region").value = rid;
       });
 
-      loadGuilds();
+      // ---- Game picker -------------------------------------------------------
+      const regionSel = document.getElementById("region");
+      const dropHint = document.getElementById("dropHint");
+      const gamePicker = document.getElementById("gamePicker");
+      const gamePickerBtn = document.getElementById("gamePickerBtn");
+      const gamePickerMenu = document.getElementById("gamePickerMenu");
+      const gamePickerLabel = document.getElementById("gamePickerLabel");
+
+      function buildRegionOptions() {
+        const g = GAMES[currentGame];
+        const prev = regionSel.value;
+        const savedRegion = (readCreds() || {}).region;
+        const valid = (v) => g.regions.some((r) => r.v === v);
+        regionSel.innerHTML = "";
+        for (const r of g.regions) {
+          const o = document.createElement("option");
+          o.value = r.v;
+          o.textContent = r.t;
+          regionSel.appendChild(o);
+        }
+        regionSel.value = valid(prev)
+          ? prev
+          : valid(savedRegion)
+            ? savedRegion
+            : g.defaultRegion;
+      }
+
+      function renderGameMenu() {
+        gamePickerMenu.innerHTML = "";
+        for (const id of GAME_ORDER) {
+          const li = document.createElement("li");
+          li.setAttribute("role", "option");
+          li.dataset.game = id;
+          li.textContent = GAMES[id].name;
+          li.setAttribute(
+            "aria-selected",
+            id === currentGame ? "true" : "false",
+          );
+          li.addEventListener("click", () => {
+            closeGameMenu();
+            if (id !== currentGame) applyGame(id);
+          });
+          gamePickerMenu.appendChild(li);
+        }
+      }
+
+      function openGameMenu() {
+        gamePicker.classList.add("open");
+        gamePickerBtn.setAttribute("aria-expanded", "true");
+      }
+      function closeGameMenu() {
+        gamePicker.classList.remove("open");
+        gamePickerBtn.setAttribute("aria-expanded", "false");
+      }
+
+      function applyGame(id) {
+        currentGame = GAMES[id] ? id : "warcraft";
+        localStorage.setItem(GAME_KEY, currentGame);
+        const g = GAMES[currentGame];
+        gamePickerLabel.textContent = g.name;
+        if (dropHint) dropHint.textContent = g.logHint;
+        renderGameMenu();
+        buildRegionOptions();
+        // Guilds are per-site; drop the old list and refresh for this game.
+        guildSel.innerHTML = "";
+        guildField.style.display = "none";
+        loadGuilds();
+      }
+
+      gamePickerBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (gamePicker.classList.contains("open")) closeGameMenu();
+        else openGameMenu();
+      });
+      document.addEventListener("click", (e) => {
+        if (!gamePicker.contains(e.target)) closeGameMenu();
+      });
+      document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") closeGameMenu();
+      });
+
+      applyGame(currentGame);
 
       function fmtSize(bytes) {
         if (bytes < 1024) return bytes + " B";
@@ -1131,6 +1393,7 @@
                 10,
               ),
               guildId: guildSel.value ? parseInt(guildSel.value, 10) : null,
+              game: currentGame,
             },
           });
         } catch (err) {
@@ -1147,6 +1410,7 @@
         fd.append("password", document.getElementById("password").value);
         fd.append("region", document.getElementById("region").value);
         fd.append("visibility", document.getElementById("visibility").value);
+        fd.append("game", currentGame);
         if (guildSel.value) fd.append("guild_id", guildSel.value);
 
         const startSse = (jobId) => {

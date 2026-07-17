@@ -24,6 +24,9 @@ struct UploadArgs {
     region: i32,
     visibility: i32,
     guild_id: Option<i64>,
+    /// RPGLogs site id ("warcraft", "ff", "eso", ...). Defaults to warcraft.
+    #[serde(default)]
+    game: String,
 }
 
 #[derive(Serialize)]
@@ -110,8 +113,12 @@ fn describe_file(path: &std::path::Path) -> FileInfo {
 }
 
 #[tauri::command]
-async fn fetch_guilds(email: String, password: String) -> Result<LoginResult, String> {
-    let session = wcl::WclSession::new()
+async fn fetch_guilds(
+    email: String,
+    password: String,
+    game: Option<String>,
+) -> Result<LoginResult, String> {
+    let session = wcl::WclSession::new(game.as_deref().unwrap_or("warcraft"))
         .await
         .map_err(|e| format!("{e:#}"))?;
     let login = session
@@ -207,7 +214,7 @@ async fn run_upload(app: &AppHandle, args: UploadArgs) -> Result<()> {
     );
 
     emit_progress(app, "session", "Initializing session...", 3);
-    let session = wcl::WclSession::new().await?;
+    let session = wcl::WclSession::new(&args.game).await?;
 
     emit_progress(app, "login", "Logging in...", 4);
     let login = session.login(&args.email, &args.password).await?;
@@ -335,7 +342,7 @@ async fn run_upload(app: &AppHandle, args: UploadArgs) -> Result<()> {
     match report_code {
         Some(code) => {
             session.terminate_report(&code).await?;
-            let url = format!("https://www.warcraftlogs.com/reports/{code}");
+            let url = session.report_url(&code);
             let _ = app.emit("upload:done", json!({"url": url, "code": code}));
             Ok(())
         }

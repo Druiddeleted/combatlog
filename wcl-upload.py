@@ -15,7 +15,24 @@ from curl_cffi import requests as cffi_requests
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARSER_HARNESS = os.path.join(SCRIPT_DIR, 'parser-harness.js')
 BATCH_SIZE = 100000
-BASE_URL = 'https://www.warcraftlogs.com'
+
+# Known RPGLogs sites. The upload mechanism is identical across all of them; only
+# the base URL and the CDN parser bundle slug (assets.rpglogs.com/js/parser-<slug>)
+# differ. The first entry is the default fallback.
+GAMES = {
+    'warcraft': {'base_url': 'https://www.warcraftlogs.com', 'parser_slug': 'warcraft'},
+    'ff':       {'base_url': 'https://www.fflogs.com',       'parser_slug': 'ff'},
+    'eso':      {'base_url': 'https://www.esologs.com',      'parser_slug': 'eso'},
+    'swtor':    {'base_url': 'https://www.swtorlogs.com',    'parser_slug': 'swtor'},
+    'fellowship': {'base_url': 'https://www.fellowshiplogs.com', 'parser_slug': 'fellowship'},
+}
+DEFAULT_GAME = 'warcraft'
+
+
+def resolve_game(game_id):
+    return GAMES.get(game_id or DEFAULT_GAME, GAMES[DEFAULT_GAME])
+
+
 FALLBACK_CLIENT_VERSION = '9.0.1'
 CHROME_VERSION = os.environ.get('WCL_CHROME_VERSION', '134.0.6998.205')
 ELECTRON_VERSION = os.environ.get('WCL_ELECTRON_VERSION', '37.7.0')
@@ -61,9 +78,11 @@ def _user_agent():
 
 
 class WCLSession:
-    def __init__(self):
+    def __init__(self, game_id=DEFAULT_GAME):
         self.session = cffi_requests.Session(impersonate="chrome")
         self.user = None
+        self.game = resolve_game(game_id)
+        self.base_url = self.game['base_url']
 
     def _request(self, method, url, **kwargs):
         kwargs.setdefault('headers', {})
@@ -83,7 +102,7 @@ class WCLSession:
         resp.raise_for_status()
 
     def login(self, email, password):
-        resp = self._request('POST', f'{BASE_URL}/desktop-client/log-in',
+        resp = self._request('POST', f'{self.base_url}/desktop-client/log-in',
             json={'email': email, 'password': password, 'version': CLIENT_VERSION},
             headers={'Content-Type': 'application/json', 'User-Agent': _user_agent()},
         )
@@ -93,7 +112,7 @@ class WCLSession:
         return result
 
     def create_report(self, filename, start_time, end_time, region=2, visibility=2, guild_id=None, parser_version=PARSER_VERSION):
-        resp = self._request('POST', f'{BASE_URL}/desktop-client/create-report',
+        resp = self._request('POST', f'{self.base_url}/desktop-client/create-report',
             json={
                 'clientVersion': CLIENT_VERSION, 'parserVersion': parser_version,
                 'startTime': start_time, 'endTime': end_time,
@@ -125,7 +144,7 @@ class WCLSession:
 
     def set_master_table(self, report_code, segment_id, master_zip_bytes):
         self._multipart(
-            f'{BASE_URL}/desktop-client/set-report-master-table/{report_code}',
+            f'{self.base_url}/desktop-client/set-report-master-table/{report_code}',
             [('segmentId', str(segment_id)), ('isRealTime', 'false')],
             [('logfile', 'blob', 'application/zip', master_zip_bytes)],
         )
@@ -138,24 +157,24 @@ class WCLSession:
             'inProgressEventCount': 0, 'segmentId': segment_id,
         })
         resp = self._multipart(
-            f'{BASE_URL}/desktop-client/add-report-segment/{report_code}',
+            f'{self.base_url}/desktop-client/add-report-segment/{report_code}',
             [('parameters', params)],
             [('logfile', 'blob', 'application/zip', fights_zip_bytes)],
         )
         return resp.json().get('nextSegmentId', segment_id + 1)
 
     def terminate_report(self, report_code):
-        self._request('POST', f'{BASE_URL}/desktop-client/terminate-report/{report_code}',
+        self._request('POST', f'{self.base_url}/desktop-client/terminate-report/{report_code}',
             headers={'User-Agent': _user_agent()},
         )
 
 
-def fetch_parser_code(session):
-    """Fetch the latest parser JS + game data from WCL (requires authed session).
+def fetch_parser_code(session, base_url, parser_slug):
+    """Fetch the latest parser JS + game data from the site (requires authed session).
     Returns (gamedata_code, parser_code, parser_version)."""
     import re
     ts = int(time.time() * 1000)
-    url = (f'{BASE_URL}/desktop-client/parser?id=1&ts={ts}'
+    url = (f'{base_url}/desktop-client/parser?id=1&ts={ts}'
            '&gameContentDetectionEnabled=false&metersEnabled=false'
            '&liveFightDataEnabled=false')
     resp = session.request('GET', url, headers={'User-Agent': _user_agent()})
@@ -165,9 +184,12 @@ def fetch_parser_code(session):
         r'<script[^>]*>(.*?window\.gameContentTypes.*?)</script>', html, re.DOTALL)
     gamedata_code = m.group(1).strip() if m else ''
 
-    m2 = re.search(r'src="(https://assets\.rpglogs\.com/js/parser-warcraft[^"]+)"', html)
+    # Prefer this game's specific parser bundle; fall back to any parser-* bundle,
+    # since each site's parser page references only its own.
+    m2 = (re.search(rf'src="(https://assets\.rpglogs\.com/js/parser-{re.escape(parser_slug)}[^"]+)"', html)
+          or re.search(r'src="(https://assets\.rpglogs\.com/js/parser-[^"]+)"', html))
     if not m2:
-        raise RuntimeError('Could not find parser-warcraft JS URL in parser page')
+        raise RuntimeError('Could not find parser JS URL in parser page')
     parser_url = m2.group(1)
     parser_code = session.get(parser_url, headers={'User-Agent': _user_agent()}).text
 
@@ -290,7 +312,7 @@ def parse_start_date_from_filename(filename):
     return None
 
 
-def upload_log(filepath, email, password, region=2, visibility=2, guild_id=None):
+def upload_log(filepath, email, password, region=2, visibility=2, guild_id=None, game=DEFAULT_GAME):
     """Main upload flow."""
     filename = os.path.basename(filepath)
 
@@ -301,13 +323,14 @@ def upload_log(filepath, email, password, region=2, visibility=2, guild_id=None)
     print(f"  {total_lines} lines")
 
     # Login first (required to fetch parser)
-    print("Logging in to WarcraftLogs...")
-    session = WCLSession()
+    session = WCLSession(game)
+    print(f"Logging in to {session.base_url}...")
     session.login(email, password)
 
-    # Fetch parser code dynamically from WCL
-    print("Fetching latest parser from WarcraftLogs...")
-    gamedata_code, parser_code, parser_version = fetch_parser_code(session.session)
+    # Fetch parser code dynamically from the site
+    print("Fetching latest parser...")
+    gamedata_code, parser_code, parser_version = fetch_parser_code(
+        session.session, session.base_url, session.game['parser_slug'])
     print(f"  Parser v{parser_version} loaded")
 
     # Start parser with fresh code
@@ -399,7 +422,7 @@ def upload_log(filepath, email, password, region=2, visibility=2, guild_id=None)
         if report_code:
             print(f"Terminating report {report_code}...")
             session.terminate_report(report_code)
-            url = f"https://www.warcraftlogs.com/reports/{report_code}"
+            url = f"{session.base_url}/reports/{report_code}"
             print(f"\nUpload complete! Report URL: {url}")
             return url
         else:
@@ -411,11 +434,14 @@ def upload_log(filepath, email, password, region=2, visibility=2, guild_id=None)
 
 
 def main():
-    p = argparse.ArgumentParser(description='Upload WoW combat logs to WarcraftLogs')
-    p.add_argument('logfile', help='Path to WoWCombatLog*.txt file')
-    p.add_argument('--email', required=True, help='WarcraftLogs email')
-    p.add_argument('--password', required=True, help='WarcraftLogs password')
-    p.add_argument('--region', type=int, default=2, help='Region (1=US, 2=EU, 3=KR, 4=TW, 5=CN)')
+    p = argparse.ArgumentParser(description='Upload combat logs to an RPGLogs site')
+    p.add_argument('logfile', help='Path to the combat log .txt file')
+    p.add_argument('--email', required=True, help='Account email')
+    p.add_argument('--password', required=True, help='Account password')
+    p.add_argument('--game', default=DEFAULT_GAME, choices=sorted(GAMES.keys()),
+                   help='Target RPGLogs site (warcraft=WarcraftLogs, ff=FFLogs, '
+                        'eso=ESOLogs, swtor=SWTORLogs, fellowship=FellowshipLogs)')
+    p.add_argument('--region', type=int, default=2, help='Region (WoW: 1=US, 2=EU, 3=KR, 4=TW, 5=CN)')
     p.add_argument('--visibility', type=int, default=2,
                    help='Visibility (0=Public, 1=Private, 2=Unlisted)')
     p.add_argument('--guild-id', type=int, default=None, help='Guild ID (optional)')
@@ -432,6 +458,7 @@ def main():
         region=args.region,
         visibility=args.visibility,
         guild_id=args.guild_id,
+        game=args.game,
     )
     if not url:
         sys.exit(1)

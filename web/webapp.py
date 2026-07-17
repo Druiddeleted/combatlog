@@ -31,7 +31,24 @@ INDEX_PATH = _LOCAL_INDEX if os.path.exists(_LOCAL_INDEX) else _REPO_INDEX
 with open(INDEX_PATH, 'r', encoding='utf-8') as _f:
     INDEX_HTML = _f.read()
 BATCH_SIZE = 100000
-BASE_URL = 'https://www.warcraftlogs.com'
+
+# Known RPGLogs sites. The upload mechanism is identical across all of them; only
+# the base URL and the CDN parser bundle slug (assets.rpglogs.com/js/parser-<slug>)
+# differ. The first entry is the default fallback.
+GAMES = {
+    'warcraft': {'base_url': 'https://www.warcraftlogs.com', 'parser_slug': 'warcraft'},
+    'ff':       {'base_url': 'https://www.fflogs.com',       'parser_slug': 'ff'},
+    'eso':      {'base_url': 'https://www.esologs.com',      'parser_slug': 'eso'},
+    'swtor':    {'base_url': 'https://www.swtorlogs.com',    'parser_slug': 'swtor'},
+    'fellowship': {'base_url': 'https://www.fellowshiplogs.com', 'parser_slug': 'fellowship'},
+}
+DEFAULT_GAME = 'warcraft'
+
+
+def resolve_game(game_id):
+    return GAMES.get(game_id or DEFAULT_GAME, GAMES[DEFAULT_GAME])
+
+
 FALLBACK_CLIENT_VERSION = '9.0.1'
 CHROME_VERSION = os.environ.get('WCL_CHROME_VERSION', '134.0.6998.205')
 ELECTRON_VERSION = os.environ.get('WCL_ELECTRON_VERSION', '37.7.0')
@@ -78,9 +95,9 @@ def _user_agent():
 jobs = {}
 
 
-def fetch_parser_code(session):
+def fetch_parser_code(session, base_url, parser_slug):
     ts = int(time.time() * 1000)
-    url = (f'{BASE_URL}/desktop-client/parser?id=1&ts={ts}'
+    url = (f'{base_url}/desktop-client/parser?id=1&ts={ts}'
            '&gameContentDetectionEnabled=false&metersEnabled=false'
            '&liveFightDataEnabled=false')
     resp = session.request('GET', url, headers={'User-Agent': _user_agent()})
@@ -90,9 +107,12 @@ def fetch_parser_code(session):
         r'<script[^>]*>(.*?window\.gameContentTypes.*?)</script>', html, re.DOTALL)
     gamedata_code = m.group(1).strip() if m else ''
 
-    m2 = re.search(r'src="(https://assets\.rpglogs\.com/js/parser-warcraft[^"]+)"', html)
+    # Prefer this game's specific parser bundle; fall back to any parser-* bundle,
+    # since each site's parser page references only its own.
+    m2 = (re.search(rf'src="(https://assets\.rpglogs\.com/js/parser-{re.escape(parser_slug)}[^"]+)"', html)
+          or re.search(r'src="(https://assets\.rpglogs\.com/js/parser-[^"]+)"', html))
     if not m2:
-        raise RuntimeError('Could not find parser-warcraft JS URL in parser page')
+        raise RuntimeError('Could not find parser JS URL in parser page')
     parser_url = m2.group(1)
     parser_code = session.get(parser_url, headers={'User-Agent': _user_agent()}).text
 
@@ -103,9 +123,11 @@ def fetch_parser_code(session):
 
 
 class WCLSession:
-    def __init__(self):
+    def __init__(self, game_id=DEFAULT_GAME):
         self.session = cffi_requests.Session(impersonate="chrome")
         self.user = None
+        self.game = resolve_game(game_id)
+        self.base_url = self.game['base_url']
 
     def _request(self, method, url, **kwargs):
         kwargs.setdefault('headers', {})
@@ -123,7 +145,7 @@ class WCLSession:
         resp.raise_for_status()
 
     def login(self, email, password):
-        resp = self._request('POST', f'{BASE_URL}/desktop-client/log-in',
+        resp = self._request('POST', f'{self.base_url}/desktop-client/log-in',
             json={'email': email, 'password': password, 'version': CLIENT_VERSION},
             headers={'Content-Type': 'application/json', 'User-Agent': _user_agent()},
         )
@@ -132,7 +154,7 @@ class WCLSession:
         return result
 
     def create_report(self, filename, start_time, end_time, region, visibility, guild_id, parser_version=PARSER_VERSION):
-        resp = self._request('POST', f'{BASE_URL}/desktop-client/create-report',
+        resp = self._request('POST', f'{self.base_url}/desktop-client/create-report',
             json={
                 'clientVersion': CLIENT_VERSION, 'parserVersion': parser_version,
                 'startTime': start_time, 'endTime': end_time,
@@ -164,7 +186,7 @@ class WCLSession:
 
     def set_master_table(self, code, seg_id, zip_bytes):
         self._multipart(
-            f'{BASE_URL}/desktop-client/set-report-master-table/{code}',
+            f'{self.base_url}/desktop-client/set-report-master-table/{code}',
             [('segmentId', str(seg_id)), ('isRealTime', 'false')],
             [('logfile', 'blob', 'application/zip', zip_bytes)],
         )
@@ -176,14 +198,14 @@ class WCLSession:
             'inProgressEventCount': 0, 'segmentId': seg_id,
         })
         resp = self._multipart(
-            f'{BASE_URL}/desktop-client/add-report-segment/{code}',
+            f'{self.base_url}/desktop-client/add-report-segment/{code}',
             [('parameters', params)],
             [('logfile', 'blob', 'application/zip', zip_bytes)],
         )
         return resp.json().get('nextSegmentId', seg_id + 1)
 
     def terminate_report(self, code):
-        self._request('POST', f'{BASE_URL}/desktop-client/terminate-report/{code}',
+        self._request('POST', f'{self.base_url}/desktop-client/terminate-report/{code}',
             headers={'User-Agent': _user_agent()},
         )
 
@@ -263,7 +285,7 @@ def parse_start_date(filename):
 
 
 
-def upload_worker(job_id, filepath, filename, email, password, region, visibility, guild_id):
+def upload_worker(job_id, filepath, filename, email, password, region, visibility, guild_id, game=DEFAULT_GAME):
     q = jobs[job_id]
 
     def emit(event, data):
@@ -275,13 +297,14 @@ def upload_worker(job_id, filepath, filename, email, password, region, visibilit
         total = len(all_lines)
         emit('progress', {'step': 'read', 'message': f'Read {total:,} lines', 'pct': 2})
 
-        session = WCLSession()
+        session = WCLSession(game)
         login_result = session.login(email, password)
         username = login_result.get('user', {}).get('userName', '?')
         emit('progress', {'step': 'login', 'message': f'Logged in as {username}', 'pct': 5})
 
         emit('progress', {'step': 'fetch-parser', 'message': 'Fetching latest parser...', 'pct': 6})
-        gamedata_code, parser_code, parser_version = fetch_parser_code(session.session)
+        gamedata_code, parser_code, parser_version = fetch_parser_code(
+            session.session, session.base_url, session.game['parser_slug'])
         emit('progress', {'step': 'fetch-parser', 'message': f'Parser v{parser_version} loaded', 'pct': 7})
 
         parser = Parser(gamedata_code=gamedata_code, parser_code=parser_code)
@@ -328,7 +351,7 @@ def upload_worker(job_id, filepath, filename, email, password, region, visibilit
 
         if report_code:
             session.terminate_report(report_code)
-            url = f'https://www.warcraftlogs.com/reports/{report_code}'
+            url = f'{session.base_url}/reports/{report_code}'
             emit('done', {'url': url, 'code': report_code})
         else:
             emit('error', {'message': 'No fights found in log file.'})
@@ -357,10 +380,11 @@ def index():
 def guilds():
     email = request.form.get('email', '')
     password = request.form.get('password', '')
+    game = request.form.get('game', DEFAULT_GAME)
     if not email or not password:
         return json.dumps({'error': 'email and password required'}), 400, {'Content-Type': 'application/json'}
     try:
-        session = WCLSession()
+        session = WCLSession(game)
         result = session.login(email, password)
         user = result.get('user') or {}
         items = result.get('guildSelectItems') or []
@@ -391,6 +415,7 @@ def upload():
     visibility = int(request.form.get('visibility', 2))
     guild_id_str = request.form.get('guild_id', '')
     guild_id = int(guild_id_str) if guild_id_str else None
+    game = request.form.get('game', DEFAULT_GAME)
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.txt')
     f.save(tmp)
@@ -400,7 +425,7 @@ def upload():
     jobs[job_id] = queue.Queue()
 
     t = threading.Thread(target=upload_worker, daemon=True,
-                         args=(job_id, tmp.name, f.filename, email, password, region, visibility, guild_id))
+                         args=(job_id, tmp.name, f.filename, email, password, region, visibility, guild_id, game))
     t.start()
 
     return json.dumps({'jobId': job_id}), 200, {'Content-Type': 'application/json'}

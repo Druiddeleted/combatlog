@@ -12,7 +12,6 @@ use wreq_util::Emulation;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-const BASE_URL: &str = "https://www.warcraftlogs.com";
 // This will be fetched dynamically
 const FALLBACK_CLIENT_VERSION: &str = "9.0.1";
 // These, well, we hope they dont chage/matter
@@ -20,6 +19,30 @@ const CHROME_VERSION: &str = "134.0.6998.205";
 const ELECTRON_VERSION: &str = "37.7.0";
 const MAX_RETRIES: u32 = 3;
 const RETRY_BASE_DELAY_MS: u64 = 1000;
+
+/// A single RPGLogs site. The upload mechanism is identical across all of them;
+/// only the base URL and the CDN parser bundle slug differ. `parser_slug` is the
+/// `assets.rpglogs.com/js/parser-<slug>` bundle the site's parser page references.
+#[derive(Debug, Clone, Copy)]
+pub struct Game {
+    pub id: &'static str,
+    pub base_url: &'static str,
+    pub parser_slug: &'static str,
+}
+
+/// Known RPGLogs sites. The first entry is the default fallback.
+pub const GAMES: &[Game] = &[
+    Game { id: "warcraft", base_url: "https://www.warcraftlogs.com", parser_slug: "warcraft" },
+    Game { id: "ff",       base_url: "https://www.fflogs.com",       parser_slug: "ff" },
+    Game { id: "eso",      base_url: "https://www.esologs.com",      parser_slug: "eso" },
+    Game { id: "swtor",    base_url: "https://www.swtorlogs.com",    parser_slug: "swtor" },
+    Game { id: "fellowship", base_url: "https://www.fellowshiplogs.com", parser_slug: "fellowship" },
+];
+
+/// Resolve a game by id, defaulting to Warcraft Logs for unknown/empty ids.
+pub fn game_by_id(id: &str) -> Game {
+    GAMES.iter().copied().find(|g| g.id == id).unwrap_or(GAMES[0])
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoginUser {
@@ -46,10 +69,12 @@ pub struct ParserBundle {
 pub struct WclSession {
     client: Client,
     client_version: String,
+    game: Game,
 }
 
 impl WclSession {
-    pub async fn new() -> Result<Self> {
+    pub async fn new(game_id: &str) -> Result<Self> {
+        let game = game_by_id(game_id);
         let client_version = fetch_latest_client_version()
             .await
             .unwrap_or_else(|_| FALLBACK_CLIENT_VERSION.to_string());
@@ -57,7 +82,16 @@ impl WclSession {
             .emulation(Emulation::Chrome133)
             .cookie_store(true)
             .build()?;
-        Ok(Self { client, client_version })
+        Ok(Self { client, client_version, game })
+    }
+
+    pub fn game(&self) -> Game {
+        self.game
+    }
+
+    /// Public report URL for a finished report on this game's site.
+    pub fn report_url(&self, code: &str) -> String {
+        format!("{}/reports/{code}", self.game.base_url)
     }
 
     fn user_agent(&self) -> String {
@@ -116,7 +150,7 @@ impl WclSession {
         let resp = self
             .send_with_retry(
                 self.client
-                    .post(format!("{BASE_URL}/desktop-client/log-in"))
+                    .post(format!("{}/desktop-client/log-in", self.game.base_url))
                     .header("Content-Type", "application/json")
                     .json(&body),
             )
@@ -129,8 +163,9 @@ impl WclSession {
             .duration_since(UNIX_EPOCH)?
             .as_millis();
         let url = format!(
-            "{BASE_URL}/desktop-client/parser?id=1&ts={ts}\
-             &gameContentDetectionEnabled=false&metersEnabled=false&liveFightDataEnabled=false"
+            "{}/desktop-client/parser?id=1&ts={ts}\
+             &gameContentDetectionEnabled=false&metersEnabled=false&liveFightDataEnabled=false",
+            self.game.base_url
         );
         let resp = self.send_with_retry(self.client.get(&url)).await?;
         let html = resp.text().await?;
@@ -142,13 +177,20 @@ impl WclSession {
             .map(|m| m.as_str().trim().to_string())
             .unwrap_or_default();
 
-        let parser_url_re =
-            Regex::new(r#"src="(https://assets\.rpglogs\.com/js/parser-warcraft[^"]+)""#)?;
-        let parser_url = parser_url_re
+        // Prefer this game's specific parser bundle; fall back to any parser-* bundle
+        // on the CDN, since each site's parser page references only its own.
+        let specific = Regex::new(&format!(
+            r#"src="(https://assets\.rpglogs\.com/js/parser-{}[^"]+)""#,
+            regex::escape(self.game.parser_slug)
+        ))?;
+        let generic =
+            Regex::new(r#"src="(https://assets\.rpglogs\.com/js/parser-[^"]+)""#)?;
+        let parser_url = specific
             .captures(&html)
+            .or_else(|| generic.captures(&html))
             .and_then(|c| c.get(1))
             .map(|m| m.as_str().to_string())
-            .context("parser-warcraft script URL not found in parser page")?;
+            .context("parser script URL not found in parser page")?;
 
         let parser_resp = self.send_with_retry(self.client.get(&parser_url)).await?;
         let parser_code = parser_resp.text().await?;
@@ -192,7 +234,7 @@ impl WclSession {
         let resp = self
             .send_with_retry(
                 self.client
-                    .post(format!("{BASE_URL}/desktop-client/create-report"))
+                    .post(format!("{}/desktop-client/create-report", self.game.base_url))
                     .header("Content-Type", "application/json")
                     .json(&body),
             )
@@ -217,7 +259,8 @@ impl WclSession {
         self.send_with_retry(
             self.client
                 .post(format!(
-                    "{BASE_URL}/desktop-client/set-report-master-table/{code}"
+                    "{}/desktop-client/set-report-master-table/{code}",
+                    self.game.base_url
                 ))
                 .header("Content-Type", format!("multipart/form-data; boundary={boundary}"))
                 .body(body),
@@ -252,7 +295,8 @@ impl WclSession {
             .send_with_retry(
                 self.client
                     .post(format!(
-                        "{BASE_URL}/desktop-client/add-report-segment/{code}"
+                        "{}/desktop-client/add-report-segment/{code}",
+                        self.game.base_url
                     ))
                     .header(
                         "Content-Type",
@@ -270,7 +314,7 @@ impl WclSession {
     pub async fn terminate_report(&self, code: &str) -> Result<()> {
         self.send_with_retry(
             self.client
-                .post(format!("{BASE_URL}/desktop-client/terminate-report/{code}")),
+                .post(format!("{}/desktop-client/terminate-report/{code}", self.game.base_url)),
         )
         .await?;
         Ok(())
