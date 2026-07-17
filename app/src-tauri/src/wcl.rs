@@ -7,7 +7,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{anyhow, bail, Context as _, Result};
 use rand::Rng;
 use regex::Regex;
-use rquest::{Client, Impersonate};
+use wreq::Client;
+use wreq_util::Emulation;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -53,7 +54,7 @@ impl WclSession {
             .await
             .unwrap_or_else(|_| FALLBACK_CLIENT_VERSION.to_string());
         let client = Client::builder()
-            .impersonate(Impersonate::Chrome133)
+            .emulation(Emulation::Chrome133)
             .cookie_store(true)
             .build()?;
         Ok(Self { client, client_version })
@@ -70,8 +71,8 @@ impl WclSession {
     /// exponential backoff + jitter on 429/5xx.
     async fn send_with_retry(
         &self,
-        mut builder: rquest::RequestBuilder,
-    ) -> Result<rquest::Response> {
+        mut builder: wreq::RequestBuilder,
+    ) -> Result<wreq::Response> {
         builder = builder.header("User-Agent", self.user_agent());
         for attempt in 0..=MAX_RETRIES {
             let req = builder
@@ -277,7 +278,7 @@ impl WclSession {
 }
 
 async fn fetch_latest_client_version() -> Result<String> {
-    let client = rquest::Client::builder().build()?;
+    let client = wreq::Client::builder().build()?;
     let resp = client
         .get("https://api.github.com/repos/RPGLogs/Uploaders-archon/releases/latest")
         .header("Accept", "application/vnd.github.v3+json")
