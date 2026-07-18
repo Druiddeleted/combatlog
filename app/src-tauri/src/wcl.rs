@@ -173,14 +173,12 @@ impl WclSession {
             .map(|m| m.as_str().trim().to_string())
             .unwrap_or_default();
 
-        // Prefer this game's specific parser bundle; fall back to any parser-* bundle
-        // on the CDN, since each site's parser page references only its own.
         let specific = Regex::new(&format!(
-            r#"src="(https://assets\.rpglogs\.com/js/parser-{}[^"]+)""#,
+            r#"src="(https://assets\.rpglogs\.com/js/(?:[\w-]+/)*parser-{}[^"]+)""#,
             regex::escape(self.game.parser_slug)
         ))?;
         let generic =
-            Regex::new(r#"src="(https://assets\.rpglogs\.com/js/parser-[^"]+)""#)?;
+            Regex::new(r#"src="(https://assets\.rpglogs\.com/js/(?:[\w-]+/)*parser-[^"]+)""#)?;
         let parser_url = specific
             .captures(&html)
             .or_else(|| generic.captures(&html))

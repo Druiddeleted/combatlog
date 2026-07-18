@@ -107,10 +107,8 @@ def fetch_parser_code(session, base_url, parser_slug):
         r'<script[^>]*>(.*?window\.gameContentTypes.*?)</script>', html, re.DOTALL)
     gamedata_code = m.group(1).strip() if m else ''
 
-    # Prefer this game's specific parser bundle; fall back to any parser-* bundle,
-    # since each site's parser page references only its own.
-    m2 = (re.search(rf'src="(https://assets\.rpglogs\.com/js/parser-{re.escape(parser_slug)}[^"]+)"', html)
-          or re.search(r'src="(https://assets\.rpglogs\.com/js/parser-[^"]+)"', html))
+    m2 = (re.search(rf'src="(https://assets\.rpglogs\.com/js/(?:[\w-]+/)*parser-{re.escape(parser_slug)}[^"]+)"', html)
+          or re.search(r'src="(https://assets\.rpglogs\.com/js/(?:[\w-]+/)*parser-[^"]+)"', html))
     if not m2:
         raise RuntimeError('Could not find parser JS URL in parser page')
     parser_url = m2.group(1)
