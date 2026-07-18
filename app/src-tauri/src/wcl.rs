@@ -85,10 +85,6 @@ impl WclSession {
         Ok(Self { client, client_version, game })
     }
 
-    pub fn game(&self) -> Game {
-        self.game
-    }
-
     /// Public report URL for a finished report on this game's site.
     pub fn report_url(&self, code: &str) -> String {
         format!("{}/reports/{code}", self.game.base_url)
