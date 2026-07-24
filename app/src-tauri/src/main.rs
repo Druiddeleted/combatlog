@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod live;
+mod manage;
 mod parser;
 mod wcl;
 
@@ -227,6 +228,62 @@ fn stop_live_log(state: tauri::State<'_, LiveLogState>) -> Result<(), String> {
     }
 }
 
+/// List `.txt` files in a folder (for the Manage Logs archive picker). Cheap:
+/// directory metadata only, no file contents are read.
+#[tauri::command]
+fn scan_logs(path: String) -> Result<Vec<FileInfo>, String> {
+    let dir = std::path::PathBuf::from(&path);
+    if !dir.is_dir() {
+        return Err(format!("not a directory: {path}"));
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let p = entry.path();
+        let is_txt = p
+            .extension()
+            .and_then(|x| x.to_str())
+            .map(|x| x.eq_ignore_ascii_case("txt"))
+            .unwrap_or(false);
+        if is_txt && p.is_file() {
+            out.push(describe_file(&p));
+        }
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// Split a combat log into per-session files on a blocking thread.
+#[tauri::command]
+async fn start_split(app: AppHandle, args: manage::SplitArgs) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || match manage::split_log(&app, args) {
+        Ok(files) => {
+            let _ = app.emit(
+                "manage:done",
+                json!({ "kind": "split", "count": files.len(), "files": files }),
+            );
+        }
+        Err(e) => {
+            let _ = app.emit("manage:error", json!({ "message": format!("{e:#}") }));
+        }
+    });
+    Ok(())
+}
+
+/// Zip + archive the selected logs on a blocking thread.
+#[tauri::command]
+async fn start_archive(app: AppHandle, args: manage::ArchiveArgs) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || match manage::archive_logs(&app, args) {
+        Ok(count) => {
+            let _ = app.emit("manage:done", json!({ "kind": "archive", "count": count }));
+        }
+        Err(e) => {
+            let _ = app.emit("manage:error", json!({ "message": format!("{e:#}") }));
+        }
+    });
+    Ok(())
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -243,7 +300,10 @@ fn main() {
             pick_log_directory,
             dir_info,
             start_live_log,
-            stop_live_log
+            stop_live_log,
+            scan_logs,
+            start_split,
+            start_archive
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

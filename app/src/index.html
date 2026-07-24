@@ -369,6 +369,49 @@
         font-weight: 300;
       }
 
+      .archive-list {
+        margin-top: 10px;
+        max-height: 168px;
+        overflow-y: auto;
+      }
+      .archive-list:empty {
+        display: none;
+      }
+      .archive-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 2px;
+        font-size: 0.78rem;
+        color: var(--text);
+      }
+      .archive-row input[type="checkbox"] {
+        width: 14px;
+        height: 14px;
+        flex-shrink: 0;
+        accent-color: var(--accent);
+        cursor: pointer;
+      }
+      .archive-row .name {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .archive-row .size {
+        margin-left: auto;
+        flex-shrink: 0;
+        color: var(--text-dim);
+        font-family: "Fira Code", monospace;
+        font-size: 0.72rem;
+      }
+      .archive-list::-webkit-scrollbar {
+        width: 4px;
+      }
+      .archive-list::-webkit-scrollbar-thumb {
+        background: var(--border);
+        border-radius: 2px;
+      }
+
       .field {
         margin-bottom: 16px;
       }
@@ -829,9 +872,10 @@
           <div id="uploadSection" style="display: none">
             <div class="mode-switch" id="modeSwitch">
               <button type="button" id="modeUpload" class="active">
-                Upload Log
+                Upload
               </button>
-              <button type="button" id="modeLive">Live Log</button>
+              <button type="button" id="modeLive">Live</button>
+              <button type="button" id="modeManage">Manage</button>
             </div>
 
             <div class="field" id="guildField">
@@ -839,7 +883,7 @@
               <select id="guild" name="guild"></select>
             </div>
 
-            <div class="row field">
+            <div class="row field" id="uploadOptions">
               <div class="field">
                 <label for="region">Region</label>
                 <select id="region" name="region">
@@ -919,6 +963,80 @@
                 <input type="checkbox" id="fightEndOnly" />
                 <span>Upload only when a fight ends</span>
               </label>
+            </div>
+
+            <div id="manageFields" style="display: none">
+              <div class="field">
+                <label>Split combat log</label>
+                <div class="dropzone" id="splitDropzone">
+                  <svg
+                    class="dropzone-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path
+                      d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"
+                    />
+                    <polyline points="14 2 14 8 20 8" />
+                    <line x1="8" y1="13" x2="16" y2="13" />
+                    <line x1="8" y1="17" x2="16" y2="17" />
+                  </svg>
+                  <div class="dropzone-text">
+                    Drop a <strong>WoWCombatLog.txt</strong> here<br />or click to
+                    browse
+                  </div>
+                  <div class="fileinfo" id="splitInfo"></div>
+                </div>
+                <button
+                  type="button"
+                  id="splitBtn"
+                  class="btn btn-secondary"
+                  disabled
+                >
+                  Split into session files…
+                </button>
+              </div>
+
+              <div class="field">
+                <label>Archive logs</label>
+                <div class="dropzone" id="archiveDropzone">
+                  <svg
+                    class="dropzone-icon"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  >
+                    <path
+                      d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z"
+                    />
+                  </svg>
+                  <div class="dropzone-text">
+                    Drop your <strong>Logs</strong> folder here<br />or click to
+                    browse
+                  </div>
+                  <div class="fileinfo" id="archiveDirInfo"></div>
+                </div>
+                <div id="archiveList" class="archive-list"></div>
+                <label class="checkline">
+                  <input type="checkbox" id="deleteOriginals" />
+                  <span>Delete originals after archiving</span>
+                </label>
+                <button
+                  type="button"
+                  id="archiveBtn"
+                  class="btn btn-secondary"
+                  disabled
+                >
+                  Archive selected…
+                </button>
+              </div>
             </div>
 
             <button type="submit" id="btn" class="btn">Upload Log</button>
@@ -1308,7 +1426,7 @@
         // for any other game.
         const canLive = isTauri && liveSupported();
         modeSwitch.classList.toggle("visible", canLive);
-        if (!canLive && mode === "live") setMode("upload");
+        if (!canLive && (mode === "live" || mode === "manage")) setMode("upload");
       }
 
       gamePickerBtn.addEventListener("click", (e) => {
@@ -1362,8 +1480,12 @@
       const modeSwitch = document.getElementById("modeSwitch");
       const modeUploadBtn = document.getElementById("modeUpload");
       const modeLiveBtn = document.getElementById("modeLive");
+      const modeManageBtn = document.getElementById("modeManage");
       const uploadFields = document.getElementById("uploadFields");
       const liveFields = document.getElementById("liveFields");
+      const manageFields = document.getElementById("manageFields");
+      const uploadOptions = document.getElementById("uploadOptions");
+      let manageRunning = false;
 
       function setSelectedDir(info) {
         selectedDir = info;
@@ -1406,19 +1528,34 @@
         return currentGame === "warcraft";
       }
       function setMode(m) {
-        if (liveRunning) return;
-        if (m === "live" && !liveSupported()) m = "upload";
+        if (liveRunning || manageRunning) return;
+        // Live and Manage are Warcraft-only.
+        if ((m === "live" || m === "manage") && !liveSupported()) m = "upload";
         mode = m;
         modeUploadBtn.classList.toggle("active", m === "upload");
         modeLiveBtn.classList.toggle("active", m === "live");
+        modeManageBtn.classList.toggle("active", m === "manage");
         uploadFields.style.display = m === "upload" ? "block" : "none";
         liveFields.style.display = m === "live" ? "block" : "none";
-        btn.textContent = m === "upload" ? "Upload Log" : "Start Live Logging";
+        manageFields.style.display = m === "manage" ? "block" : "none";
+        // Guild / region / visibility and the submit button apply to
+        // upload + live only; Manage has its own action buttons.
+        const isManage = m === "manage";
+        uploadOptions.style.display = isManage ? "none" : "";
+        guildField.style.display = isManage
+          ? "none"
+          : guildSel.options.length
+            ? "block"
+            : "none";
+        btn.style.display = isManage ? "none" : "";
+        if (!isManage)
+          btn.textContent = m === "upload" ? "Upload Log" : "Start Live Logging";
       }
 
       if (isTauri) {
         modeUploadBtn.addEventListener("click", () => setMode("upload"));
         modeLiveBtn.addEventListener("click", () => setMode("live"));
+        modeManageBtn.addEventListener("click", () => setMode("manage"));
         loadLiveSettings();
       }
 
@@ -1437,14 +1574,20 @@
         ["dragenter", "dragover", "dragleave", "drop"].forEach((ev) =>
           window.addEventListener(ev, (e) => e.preventDefault()),
         );
+        const dropZones = () =>
+          mode === "live"
+            ? [liveDz]
+            : mode === "manage"
+              ? [splitDropzone, archiveDropzone]
+              : [dz];
         getCurrentWebview().onDragDropEvent(async (event) => {
-          const zone = mode === "live" ? liveDz : dz;
+          const zones = dropZones();
           if (event.payload.type === "over" || event.payload.type === "enter") {
-            zone.classList.add("dragover");
+            zones.forEach((z) => z.classList.add("dragover"));
           } else if (event.payload.type === "leave") {
-            zone.classList.remove("dragover");
+            zones.forEach((z) => z.classList.remove("dragover"));
           } else if (event.payload.type === "drop") {
-            zone.classList.remove("dragover");
+            zones.forEach((z) => z.classList.remove("dragover"));
             const paths = event.payload.paths || [];
             if (!paths.length) return;
             try {
@@ -1452,6 +1595,15 @@
                 const info = await invoke("dir_info", { path: paths[0] });
                 setSelectedDir(info);
                 saveLiveSettings();
+              } else if (mode === "manage") {
+                // A folder drop feeds the archiver; a file drop feeds the splitter.
+                try {
+                  const info = await invoke("dir_info", { path: paths[0] });
+                  await setArchiveDir(info);
+                } catch {
+                  const info = await invoke("file_info", { path: paths[0] });
+                  setSplitSource(info);
+                }
               } else {
                 const info = await invoke("file_info", { path: paths[0] });
                 setSelected(info);
@@ -1521,6 +1673,7 @@
       function setModeSwitchEnabled(on) {
         modeUploadBtn.disabled = !on;
         modeLiveBtn.disabled = !on;
+        modeManageBtn.disabled = !on;
       }
       function resetUI() {
         btn.disabled = true;
@@ -1666,6 +1819,199 @@
         }
       }
 
+      // ---- Manage logs (split / archive) -------------------------------------
+      const splitDropzone = document.getElementById("splitDropzone");
+      const splitInfo = document.getElementById("splitInfo");
+      const splitBtn = document.getElementById("splitBtn");
+      const archiveDropzone = document.getElementById("archiveDropzone");
+      const archiveDirInfo = document.getElementById("archiveDirInfo");
+      const archiveListEl = document.getElementById("archiveList");
+      const deleteOriginals = document.getElementById("deleteOriginals");
+      const archiveBtn = document.getElementById("archiveBtn");
+      let splitSource = null;
+
+      function setSplitSource(info) {
+        splitSource = info;
+        if (info) {
+          splitDropzone.classList.add("has-file");
+          splitInfo.innerHTML =
+            info.name + ' <span class="size">' + fmtSize(info.size) + "</span>";
+        } else {
+          splitDropzone.classList.remove("has-file");
+          splitInfo.textContent = "";
+        }
+        splitBtn.disabled = !splitSource;
+      }
+
+      function updateArchiveBtn() {
+        const checked = archiveListEl.querySelectorAll(
+          'input[type="checkbox"]:checked',
+        ).length;
+        archiveBtn.disabled = checked === 0;
+        archiveBtn.textContent = checked
+          ? "Archive " + checked + " log" + (checked === 1 ? "" : "s") + "…"
+          : "Archive selected…";
+      }
+
+      function renderArchiveList(files) {
+        archiveListEl.innerHTML = "";
+        for (const f of files || []) {
+          const row = document.createElement("label");
+          row.className = "archive-row";
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = true;
+          cb.dataset.path = f.path;
+          cb.addEventListener("change", updateArchiveBtn);
+          const name = document.createElement("span");
+          name.className = "name";
+          name.textContent = f.name;
+          const size = document.createElement("span");
+          size.className = "size";
+          size.textContent = fmtSize(f.size);
+          row.append(cb, name, size);
+          archiveListEl.appendChild(row);
+        }
+        updateArchiveBtn();
+      }
+
+      async function setArchiveDir(info) {
+        if (info) {
+          archiveDropzone.classList.add("has-file");
+          archiveDirInfo.textContent = info.path;
+          try {
+            const files = await invoke("scan_logs", { path: info.path });
+            renderArchiveList(files);
+            if (!files.length) appendLog("No .txt logs found in that folder.");
+          } catch (err) {
+            showError(String(err));
+          }
+        } else {
+          archiveDropzone.classList.remove("has-file");
+          archiveDirInfo.textContent = "";
+          renderArchiveList([]);
+        }
+      }
+
+      function resetManageUI() {
+        manageRunning = true;
+        setModeSwitchEnabled(false);
+        splitBtn.disabled = true;
+        archiveBtn.disabled = true;
+        prog.style.display = "block";
+        barTrack.style.display = "none";
+        resultEl.style.display = "none";
+        errMsg.style.display = "none";
+        logEl.textContent = "";
+        statusEl.textContent = "";
+      }
+      function finishManageUI() {
+        manageRunning = false;
+        setModeSwitchEnabled(true);
+        splitBtn.disabled = !splitSource;
+        updateArchiveBtn();
+      }
+
+      async function runManage(command, args, startMessage) {
+        let unlisteners = [];
+        const cleanup = () => {
+          unlisteners.forEach((fn) => {
+            try {
+              fn();
+            } catch {}
+          });
+          unlisteners = [];
+        };
+        unlisteners.push(
+          await listen("manage:progress", (e) => {
+            statusEl.textContent = e.payload.message;
+            appendLog(e.payload.message);
+          }),
+        );
+        unlisteners.push(
+          await listen("manage:done", (e) => {
+            const p = e.payload;
+            if (p.kind === "split") {
+              appendLog(
+                "Done — wrote " +
+                  p.count +
+                  " session file" +
+                  (p.count === 1 ? "" : "s") +
+                  ".",
+              );
+              for (const f of p.files || [])
+                appendLog("  • " + f.name + "  (" + fmtSize(f.bytes) + ")");
+            } else {
+              appendLog(
+                "Done — archived " +
+                  p.count +
+                  " log" +
+                  (p.count === 1 ? "" : "s") +
+                  ".",
+              );
+            }
+            statusEl.textContent = "Complete";
+            finishManageUI();
+            cleanup();
+          }),
+        );
+        unlisteners.push(
+          await listen("manage:error", (e) => {
+            showError(e.payload.message);
+            statusEl.textContent = "Failed";
+            finishManageUI();
+            cleanup();
+          }),
+        );
+        resetManageUI();
+        appendLog(startMessage);
+        try {
+          await invoke(command, { args });
+        } catch (err) {
+          showError(String(err));
+          finishManageUI();
+          cleanup();
+        }
+      }
+
+      if (isTauri) {
+        splitDropzone.addEventListener("click", async () => {
+          const info = await invoke("pick_log_file");
+          if (info) setSplitSource(info);
+        });
+        archiveDropzone.addEventListener("click", async () => {
+          const info = await invoke("pick_log_directory");
+          if (info) await setArchiveDir(info);
+        });
+        splitBtn.addEventListener("click", async () => {
+          if (!splitSource) return;
+          const outDir = await invoke("pick_log_directory");
+          if (!outDir) return;
+          await runManage(
+            "start_split",
+            { source: splitSource.path, outputDir: outDir.path },
+            "Splitting " + splitSource.name + " → " + outDir.path,
+          );
+        });
+        archiveBtn.addEventListener("click", async () => {
+          const files = [
+            ...archiveListEl.querySelectorAll('input[type="checkbox"]:checked'),
+          ].map((cb) => cb.dataset.path);
+          if (!files.length) return;
+          const destDir = await invoke("pick_log_directory");
+          if (!destDir) return;
+          await runManage(
+            "start_archive",
+            {
+              files,
+              destDir: destDir.path,
+              deleteOriginals: deleteOriginals.checked,
+            },
+            "Archiving " + files.length + " log(s) → " + destDir.path,
+          );
+        });
+      }
+
       async function tauriUpload() {
         let unlisteners = [];
         const cleanup = () => {
@@ -1799,6 +2145,9 @@
 
       document.getElementById("form").addEventListener("submit", async (e) => {
         e.preventDefault();
+        // Manage mode has its own Split/Archive buttons; the submit button is
+        // hidden, so ignore any stray form submit (e.g. Enter keypress).
+        if (mode === "manage") return;
         if (mode === "live") {
           if (liveRunning) {
             await stopLive();
