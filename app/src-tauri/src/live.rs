@@ -290,7 +290,20 @@ async fn tail_loop(
             offset = chunk.new_offset;
             last_data = Instant::now();
             dirty = true;
-            uploader.upload_part(&chunk.lines, false, cancel, progress).await
+            // A boss ENCOUNTER_END auto-commits as a fight, so normal push=false
+            // tailing catches it. A Mythic+ CHALLENGE_MODE_END does NOT
+            // auto-commit, so without a push the run never finalizes and WCL
+            // shows the key uncompleted. Force-commit on the chunk carrying the
+            // key's end — the same collect_fights(push=true) a full upload does
+            // at its batch boundaries — so the challenge finalizes with its
+            // timing.
+            let key_ended = chunk
+                .lines
+                .iter()
+                .any(|l| l.contains("CHALLENGE_MODE_END"));
+            uploader
+                .upload_part(&chunk.lines, key_ended, cancel, progress)
+                .await
         };
         if let Err(e) = flush_result {
             if cancelled(cancel) {
