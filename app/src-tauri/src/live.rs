@@ -1,4 +1,4 @@
-//! Live log engine. Tails the standard WoWCombatLog.txt in a directory and
+//! Live log engine. Tails the active WoWCombatLog(-*)?.txt in a directory and
 //! uploads segments to a live report, mirroring the Archon App's liveLogOperation.
 
 use std::io::SeekFrom;
@@ -15,9 +15,11 @@ use tokio::sync::watch;
 
 use crate::{parser, wcl};
 
-// Only the standard fixed-name combat log, never the dated per-session
-// variants (WoWCombatLog-MMDDYY_HHMMSS.txt) WoW writes with per-session naming.
-const LOG_FILE_PATTERN: &str = r"^WoWCombatLog\.txt$";
+// The standard combat log OR the dated per-session variants
+// (WoWCombatLog-MMDDYY_HHMMSS.txt) WoW writes with per-session naming.
+// find_newest_log() then picks whichever is being actively written (newest
+// mtime), so it works regardless of the client's per-session-log setting.
+const LOG_FILE_PATTERN: &str = r"^WoWCombatLog.*\.txt$";
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const IDLE_THRESHOLD: Duration = Duration::from_secs(120);
 const MAX_FILE_AGE: Duration = Duration::from_secs(6 * 3600);
