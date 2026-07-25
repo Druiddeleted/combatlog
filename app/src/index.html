@@ -1055,6 +1055,14 @@
           <div class="label" id="resultLabel">Upload complete</div>
           <a id="report-link" href="#" target="_blank"></a>
           <button class="copy-btn" id="copyBtn" type="button">Copy URL</button>
+          <button
+            class="copy-btn"
+            id="archiveThisBtn"
+            type="button"
+            style="display: none"
+          >
+            Archive this log…
+          </button>
         </div>
 
         <div id="error-msg"></div>
@@ -1656,6 +1664,84 @@
 
       const barTrack = document.getElementById("barTrack");
       const resultLabel = document.getElementById("resultLabel");
+      const archiveThisBtn = document.getElementById("archiveThisBtn");
+      // Full path of the just-finished log, so it can be archived from the
+      // result panel (set after an upload or a stopped live log).
+      let lastLogPath = null;
+
+      // Offer to archive the file that was just uploaded / live-logged.
+      function showArchiveOption(path) {
+        lastLogPath = path || null;
+        if (lastLogPath) {
+          archiveThisBtn.style.display = "inline-block";
+          archiveThisBtn.disabled = false;
+          archiveThisBtn.textContent = "Archive this log…";
+        } else {
+          archiveThisBtn.style.display = "none";
+        }
+      }
+      function hideArchiveOption() {
+        lastLogPath = null;
+        archiveThisBtn.style.display = "none";
+      }
+
+      // Archive one log to a chosen folder, keeping the original. Reuses the
+      // start_archive backend but keeps the result panel (report link) visible.
+      async function archiveSingle(path, destDir) {
+        let unlisteners = [];
+        const cleanup = () => {
+          unlisteners.forEach((fn) => {
+            try {
+              fn();
+            } catch {}
+          });
+          unlisteners = [];
+        };
+        archiveThisBtn.disabled = true;
+        archiveThisBtn.textContent = "Archiving…";
+        unlisteners.push(
+          await listen("manage:progress", (e) => {
+            statusEl.textContent = e.payload.message;
+            appendLog(e.payload.message);
+          }),
+        );
+        unlisteners.push(
+          await listen("manage:done", () => {
+            appendLog("Archived to " + destDir);
+            statusEl.textContent = "Archived";
+            archiveThisBtn.textContent = "Archived ✓";
+            archiveThisBtn.disabled = true;
+            cleanup();
+          }),
+        );
+        unlisteners.push(
+          await listen("manage:error", (e) => {
+            showError(e.payload.message);
+            archiveThisBtn.disabled = false;
+            archiveThisBtn.textContent = "Archive this log…";
+            cleanup();
+          }),
+        );
+        try {
+          await invoke("start_archive", {
+            args: { files: [path], destDir, deleteOriginals: false },
+          });
+        } catch (err) {
+          showError(String(err));
+          archiveThisBtn.disabled = false;
+          archiveThisBtn.textContent = "Archive this log…";
+          cleanup();
+        }
+      }
+
+      if (isTauri) {
+        archiveThisBtn.addEventListener("click", async () => {
+          if (!lastLogPath) return;
+          const dest = await invoke("pick_log_directory");
+          if (!dest) return;
+          await archiveSingle(lastLogPath, dest.path);
+        });
+      }
 
       function setBar(pct) {
         const cur = parseFloat(bar.style.width) || 0;
@@ -1683,6 +1769,7 @@
         resultLabel.textContent = "Upload complete";
         resultEl.style.display = "none";
         errMsg.style.display = "none";
+        hideArchiveOption();
         logEl.textContent = "";
         statusEl.textContent = "Preparing...";
         bar.style.width = "0%";
@@ -1702,6 +1789,7 @@
         barTrack.style.display = "none";
         resultEl.style.display = "none";
         errMsg.style.display = "none";
+        hideArchiveOption();
         logEl.textContent = "";
         statusEl.textContent = "";
       }
@@ -1724,6 +1812,9 @@
             ev.preventDefault();
             openUrl(url);
           };
+        // Offer to archive the file that was just uploaded (Tauri only —
+        // needs a real filesystem path).
+        if (isTauri && selected) showArchiveOption(selected.path);
         finishUI();
       }
       function handleProgress(d) {
@@ -1767,6 +1858,8 @@
             appendLog(
               "Live log ended — " + e.payload.segments + " segments uploaded",
             );
+            resultEl.style.display = "block";
+            showArchiveOption(e.payload.file);
             finishLiveUI();
             cleanup();
           }),

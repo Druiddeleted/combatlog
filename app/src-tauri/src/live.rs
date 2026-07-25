@@ -139,9 +139,14 @@ pub async fn run_live_log(
 
     result?;
     if let Some((code, url)) = &report {
+        // Full path of the log that was tailed, so the UI can offer to archive it.
+        let file_path = progress
+            .file
+            .as_ref()
+            .map(|f| dir.join(f).to_string_lossy().to_string());
         let _ = app.emit(
             "live:done",
-            json!({"url": url, "code": code, "segments": progress.segments}),
+            json!({"url": url, "code": code, "segments": progress.segments, "file": file_path}),
         );
     }
     Ok(())
