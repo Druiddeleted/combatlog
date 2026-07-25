@@ -417,6 +417,7 @@ impl Uploader<'_> {
         }
         let mut fd = self.parser.collect_fights(push_fight).await?;
         let mut in_progress_count: i64 = 0;
+        let mut uploading_in_progress = false;
 
         if fights_empty(&fd) {
             let ip = self.parser.collect_in_progress_fight().await?;
@@ -438,11 +439,18 @@ impl Uploader<'_> {
                 .and_then(|n| n.as_i64())
                 .unwrap_or(0);
             fd = ip;
+            uploading_in_progress = true;
         } else {
             progress.in_progress = false;
         }
 
-        let is_real_time = self.args.enable_real_time_uploading;
+        // Mark ONLY genuine in-progress uploads as real-time/provisional. A
+        // completed fight is finalized (isRealTime=false, inProgressEventCount=0)
+        // so WarcraftLogs replaces the provisional segment with the real
+        // encounter instead of leaving the boss stuck as "trash" / the key as a
+        // partial run. (v0.2.0 used a session-wide isRealTime for both, which is
+        // what left live-streamed fights misclassified.)
+        let is_real_time = uploading_in_progress;
         let (session, code, segment_id) = (self.session, self.code, self.segment_id);
         let (email, password) = (self.args.email.clone(), self.args.password.clone());
 

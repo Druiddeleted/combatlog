@@ -960,7 +960,7 @@
                 <span>Include existing file contents in the report</span>
               </label>
               <label class="checkline">
-                <input type="checkbox" id="fightEndOnly" />
+                <input type="checkbox" id="fightEndOnly" checked />
                 <span>Upload only when a fight ends</span>
               </label>
             </div>
@@ -1511,7 +1511,6 @@
           JSON.stringify({
             directory: selectedDir ? selectedDir.path : null,
             includeExisting: includeExisting.checked,
-            fightEndOnly: fightEndOnly.checked,
           }),
         );
       }
@@ -1526,8 +1525,9 @@
           setSelectedDir({ path: d.directory, name: d.directory, size: 0 });
         if (typeof d.includeExisting === "boolean")
           includeExisting.checked = d.includeExisting;
-        if (typeof d.fightEndOnly === "boolean")
-          fightEndOnly.checked = d.fightEndOnly;
+        // "Upload only when a fight ends" is intentionally NOT restored — it
+        // defaults ON every session. Real-time streaming can misclassify
+        // live-streamed fights, so it's an explicit per-session opt-in.
       }
 
       // Live logging only makes sense for Warcraft (it tails WoWCombatLog.txt).
