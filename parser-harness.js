@@ -162,6 +162,11 @@ function handleLegacyCommand(cmd) {
     case "set-report-code":
       respond({ ok: true });
       break;
+    case "set-live-logging-start-time":
+      // events before this time are excluded from fights by the parser bundle
+      liveLoggingStartTime = cmd.startTime;
+      respond({ ok: true });
+      break;
     case "parse-lines":
       for (let i = 0; i < cmd.lines.length; i++) {
         parsedLineCount++;
@@ -206,6 +211,31 @@ function handleLegacyCommand(cmd) {
         fights,
       });
       break;
+    case "collect-in-progress-fight": {
+      // non-destructive read of the events accumulated since the last
+      // pushLogFight; they stay buffered and are re-sent when the fight
+      // completes (the server reconciles via inProgressEventCount and a
+      // non-advancing segmentId). typeof-guarded so a bundle that doesn't
+      // expose these globals degrades to "no in-progress data" instead of
+      // throwing.
+      const lae =
+        typeof lastAssignedEventID !== "undefined" ? lastAssignedEventID : 0;
+      const cei =
+        typeof currentEventIndex !== "undefined" ? currentEventIndex : 0;
+      const es = typeof eventsString !== "undefined" ? eventsString : "";
+      const inProgress =
+        lae > cei ? [{ eventCount: lae - cei, eventsString: es }] : [];
+      respond({
+        ok: true,
+        logVersion,
+        gameVersion,
+        mythic,
+        startTime,
+        endTime,
+        fights: inProgress,
+      });
+      break;
+    }
     case "collect-master-info":
       buildActorsString();
       if (typeof buildAbilitiesStringIfNeeded === "function")
