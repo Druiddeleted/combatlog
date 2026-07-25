@@ -897,9 +897,9 @@
               <div class="field">
                 <label for="visibility">Visibility</label>
                 <select id="visibility" name="visibility">
-                  <option value="0">Public</option>
+                  <option value="0" selected>Public</option>
                   <option value="1">Private</option>
-                  <option value="2" selected>Unlisted</option>
+                  <option value="2">Unlisted</option>
                 </select>
               </div>
             </div>
@@ -1163,8 +1163,8 @@
         document.getElementById("email").value = d.email || "";
         document.getElementById("password").value = d.password || "";
         if (d.region) document.getElementById("region").value = d.region;
-        if (d.visibility)
-          document.getElementById("visibility").value = d.visibility;
+        // Visibility is intentionally NOT restored — it always starts at the
+        // default (Public) so a remembered value can't silently downgrade it.
       }
       function saveCreds() {
         localStorage.setItem(
@@ -1173,7 +1173,6 @@
             email: document.getElementById("email").value,
             password: document.getElementById("password").value,
             region: document.getElementById("region").value,
-            visibility: document.getElementById("visibility").value,
           }),
         );
       }
