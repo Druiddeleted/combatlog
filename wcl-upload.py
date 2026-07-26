@@ -431,11 +431,41 @@ def upload_log(filepath, email, password, region=2, visibility=2, guild_id=None,
         parser.close()
 
 
+# Credentials file: KEY=VALUE lines (WCL_EMAIL / WCL_PASSWORD), # comments ok.
+CREDENTIALS_FILE = os.path.join(
+    os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config')),
+    'wcl-upload', 'credentials.env')
+
+
+def resolve_credentials(email, password):
+    """CLI args win, then env vars, then the credentials file."""
+    email = email or os.environ.get('WCL_EMAIL')
+    password = password or os.environ.get('WCL_PASSWORD')
+    if (not email or not password) and os.path.exists(CREDENTIALS_FILE):
+        creds = {}
+        with open(CREDENTIALS_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#') or '=' not in line:
+                    continue
+                k, _, v = line.partition('=')
+                creds[k.strip()] = v.strip().strip('"').strip("'")
+        email = email or creds.get('WCL_EMAIL')
+        password = password or creds.get('WCL_PASSWORD')
+    if not email or not password:
+        print('Error: no credentials. Pass --email/--password, set WCL_EMAIL/'
+              f'WCL_PASSWORD, or create {CREDENTIALS_FILE}')
+        sys.exit(1)
+    return email, password
+
+
 def main():
     p = argparse.ArgumentParser(description='Upload combat logs to an RPGLogs site')
-    p.add_argument('logfile', help='Path to the combat log .txt file')
-    p.add_argument('--email', required=True, help='Account email')
-    p.add_argument('--password', required=True, help='Account password')
+    p.add_argument('logfile', nargs='?', default=None, help='Path to the combat log .txt file')
+    p.add_argument('--email', default=None,
+                   help='Account email (default: WCL_EMAIL env var or credentials file)')
+    p.add_argument('--password', default=None,
+                   help='Account password (default: WCL_PASSWORD env var or credentials file)')
     p.add_argument('--game', default=DEFAULT_GAME, choices=sorted(GAMES.keys()),
                    help='Target RPGLogs site (warcraft=WarcraftLogs, ff=FFLogs, '
                         'eso=ESOLogs, swtor=SWTORLogs, fellowship=FellowshipLogs)')
@@ -443,16 +473,39 @@ def main():
     p.add_argument('--visibility', type=int, default=2,
                    help='Visibility (0=Public, 1=Private, 2=Unlisted)')
     p.add_argument('--guild-id', type=int, default=None, help='Guild ID (optional)')
+    p.add_argument('--dump-parser', metavar='DIR', default=None,
+                   help='Log in, save the current parser bundle (gamedata.js / parser.js) '
+                        'to DIR, and exit without uploading. logfile is ignored.')
     args = p.parse_args()
 
-    if not os.path.exists(args.logfile):
+    email, password = resolve_credentials(args.email, args.password)
+
+    if args.dump_parser:
+        game = resolve_game(args.game)
+        session = WCLSession(args.game)
+        session.login(email, password)
+        gamedata, parser_code, pv = fetch_parser_code(
+            session.session, game['base_url'], game['parser_slug'])
+        os.makedirs(args.dump_parser, exist_ok=True)
+        gd_path = os.path.join(args.dump_parser, 'gamedata.js')
+        ps_path = os.path.join(args.dump_parser, 'parser.js')
+        with open(gd_path, 'w') as f:
+            f.write(gamedata)
+        with open(ps_path, 'w') as f:
+            f.write(parser_code)
+        print(f"parserVersion={pv}")
+        print(f"wrote {gd_path} ({len(gamedata)} bytes)")
+        print(f"wrote {ps_path} ({len(parser_code)} bytes)")
+        return
+
+    if not args.logfile or not os.path.exists(args.logfile):
         print(f"Error: File not found: {args.logfile}")
         sys.exit(1)
 
     url = upload_log(
         args.logfile,
-        args.email,
-        args.password,
+        email,
+        password,
         region=args.region,
         visibility=args.visibility,
         guild_id=args.guild_id,
