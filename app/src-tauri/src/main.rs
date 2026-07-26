@@ -270,12 +270,16 @@ async fn start_split(app: AppHandle, args: manage::SplitArgs) -> Result<(), Stri
     Ok(())
 }
 
-/// Zip + archive the selected logs on a blocking thread.
+/// Zip + archive the selected logs on a blocking thread. With no `destDir` they
+/// go to the archive folder inside their own logs folder.
 #[tauri::command]
 async fn start_archive(app: AppHandle, args: manage::ArchiveArgs) -> Result<(), String> {
     tokio::task::spawn_blocking(move || match manage::archive_logs(&app, args) {
-        Ok(count) => {
-            let _ = app.emit("manage:done", json!({ "kind": "archive", "count": count }));
+        Ok(res) => {
+            let _ = app.emit(
+                "manage:done",
+                json!({ "kind": "archive", "count": res.count, "destDir": res.dest_dir }),
+            );
         }
         Err(e) => {
             let _ = app.emit("manage:error", json!({ "message": format!("{e:#}") }));

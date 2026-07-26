@@ -1024,6 +1024,10 @@
                   <div class="fileinfo" id="archiveDirInfo"></div>
                 </div>
                 <div id="archiveList" class="archive-list"></div>
+                <div class="fileinfo" id="archiveDestHint">
+                  Archives go to <strong>warcraftlogsarchive</strong> inside the
+                  logs folder.
+                </div>
                 <label class="checkline">
                   <input type="checkbox" id="deleteOriginals" />
                   <span>Delete originals after archiving</span>
@@ -1034,7 +1038,7 @@
                   class="btn btn-secondary"
                   disabled
                 >
-                  Archive selected…
+                  Archive selected
                 </button>
               </div>
             </div>
@@ -1061,7 +1065,7 @@
             type="button"
             style="display: none"
           >
-            Archive this log…
+            Archive this log
           </button>
         </div>
 
@@ -1675,7 +1679,7 @@
         if (lastLogPath) {
           archiveThisBtn.style.display = "inline-block";
           archiveThisBtn.disabled = false;
-          archiveThisBtn.textContent = "Archive this log…";
+          archiveThisBtn.textContent = "Archive this log";
         } else {
           archiveThisBtn.style.display = "none";
         }
@@ -1685,9 +1689,10 @@
         archiveThisBtn.style.display = "none";
       }
 
-      // Archive one log to a chosen folder, keeping the original. Reuses the
-      // start_archive backend but keeps the result panel (report link) visible.
-      async function archiveSingle(path, destDir) {
+      // Archive one log to the archive folder inside its own logs folder,
+      // keeping the original. Reuses the start_archive backend but keeps the
+      // result panel (report link) visible.
+      async function archiveSingle(path) {
         let unlisteners = [];
         const cleanup = () => {
           unlisteners.forEach((fn) => {
@@ -1706,8 +1711,8 @@
           }),
         );
         unlisteners.push(
-          await listen("manage:done", () => {
-            appendLog("Archived to " + destDir);
+          await listen("manage:done", (e) => {
+            appendLog("Archived to " + (e.payload.destDir || ARCHIVE_DIR_NAME));
             statusEl.textContent = "Archived";
             archiveThisBtn.textContent = "Archived ✓";
             archiveThisBtn.disabled = true;
@@ -1718,18 +1723,18 @@
           await listen("manage:error", (e) => {
             showError(e.payload.message);
             archiveThisBtn.disabled = false;
-            archiveThisBtn.textContent = "Archive this log…";
+            archiveThisBtn.textContent = "Archive this log";
             cleanup();
           }),
         );
         try {
           await invoke("start_archive", {
-            args: { files: [path], destDir, deleteOriginals: false },
+            args: { files: [path], deleteOriginals: false },
           });
         } catch (err) {
           showError(String(err));
           archiveThisBtn.disabled = false;
-          archiveThisBtn.textContent = "Archive this log…";
+          archiveThisBtn.textContent = "Archive this log";
           cleanup();
         }
       }
@@ -1737,9 +1742,7 @@
       if (isTauri) {
         archiveThisBtn.addEventListener("click", async () => {
           if (!lastLogPath) return;
-          const dest = await invoke("pick_log_directory");
-          if (!dest) return;
-          await archiveSingle(lastLogPath, dest.path);
+          await archiveSingle(lastLogPath);
         });
       }
 
@@ -1912,6 +1915,9 @@
       }
 
       // ---- Manage logs (split / archive) -------------------------------------
+      // Archives always land in this folder inside the logs folder itself (or an
+      // existing *archive* folder there) — never a folder picked per run.
+      const ARCHIVE_DIR_NAME = "warcraftlogsarchive";
       const splitDropzone = document.getElementById("splitDropzone");
       const splitInfo = document.getElementById("splitInfo");
       const splitBtn = document.getElementById("splitBtn");
@@ -1941,8 +1947,8 @@
         ).length;
         archiveBtn.disabled = checked === 0;
         archiveBtn.textContent = checked
-          ? "Archive " + checked + " log" + (checked === 1 ? "" : "s") + "…"
-          : "Archive selected…";
+          ? "Archive " + checked + " log" + (checked === 1 ? "" : "s")
+          : "Archive selected";
       }
 
       function renderArchiveList(files) {
@@ -2039,6 +2045,7 @@
                   p.count +
                   " log" +
                   (p.count === 1 ? "" : "s") +
+                  (p.destDir ? " to " + p.destDir : "") +
                   ".",
               );
             }
@@ -2090,16 +2097,10 @@
             ...archiveListEl.querySelectorAll('input[type="checkbox"]:checked'),
           ].map((cb) => cb.dataset.path);
           if (!files.length) return;
-          const destDir = await invoke("pick_log_directory");
-          if (!destDir) return;
           await runManage(
             "start_archive",
-            {
-              files,
-              destDir: destDir.path,
-              deleteOriginals: deleteOriginals.checked,
-            },
-            "Archiving " + files.length + " log(s) → " + destDir.path,
+            { files, deleteOriginals: deleteOriginals.checked },
+            "Archiving " + files.length + " log(s) → " + ARCHIVE_DIR_NAME + "/",
           );
         });
       }

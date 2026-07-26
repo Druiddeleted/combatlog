@@ -1,5 +1,6 @@
 //! Local log management: split one combat log into per-session files, and
-//! archive completed logs into a zip-per-file backup folder.
+//! archive completed logs into the `warcraftlogsarchive` folder inside the logs
+//! folder (zip-per-file).
 //!
 //! Both operations stream (1 MiB buffers, zip64 enabled) so multi-GB combat
 //! logs are handled without loading a whole file into memory. They run on a
@@ -151,27 +152,84 @@ fn parse_session_stamp(line: &str) -> Option<String> {
 
 // ---- Archive ---------------------------------------------------------------
 
+/// Folder created next to the logs when no archive folder exists yet.
+pub const ARCHIVE_DIR_NAME: &str = "warcraftlogsarchive";
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchiveArgs {
     pub files: Vec<String>,
-    pub dest_dir: String,
+    /// Explicit destination. When omitted (the normal case) each log is
+    /// archived into the archive folder inside its own logs folder — see
+    /// [`archive_dir_for`].
+    #[serde(default)]
+    pub dest_dir: Option<String>,
     pub delete_originals: bool,
 }
 
-/// Zip each file in `files` (one entry per zip, zip64 for >4 GB) into
-/// `dest_dir`, optionally deleting the source afterward. Returns the count
-/// successfully archived.
-pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<u32> {
-    let dest = PathBuf::from(&args.dest_dir);
-    fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveResult {
+    pub count: u32,
+    /// Where the logs ended up, for the UI to report. Only set when every log
+    /// went to the same folder (always true for a single-folder selection).
+    pub dest_dir: Option<String>,
+}
+
+/// The archive folder for a log: an existing `*archive*` subfolder of the log's
+/// own folder if there is one ("whatever it's called right now"), otherwise
+/// `<logs folder>/warcraftlogsarchive`. A log already sitting inside an archive
+/// folder archives in place.
+fn archive_dir_for(src: &Path) -> PathBuf {
+    let parent = src.parent().unwrap_or_else(|| Path::new("."));
+    if is_archive_name(parent) {
+        return parent.to_path_buf();
+    }
+    if let Ok(entries) = fs::read_dir(parent) {
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir() && is_archive_name(p))
+            .collect();
+        found.sort();
+        // Prefer the canonical name when several archive-ish folders exist.
+        if let Some(exact) = found.iter().find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.eq_ignore_ascii_case(ARCHIVE_DIR_NAME))
+                .unwrap_or(false)
+        }) {
+            return exact.clone();
+        }
+        if let Some(first) = found.into_iter().next() {
+            return first;
+        }
+    }
+    parent.join(ARCHIVE_DIR_NAME)
+}
+
+fn is_archive_name(dir: &Path) -> bool {
+    dir.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n.to_ascii_lowercase().contains("archive"))
+        .unwrap_or(false)
+}
+
+/// Zip each file in `files` (one entry per zip, zip64 for >4 GB) into the
+/// archive folder, optionally deleting the source afterward. Returns the count
+/// successfully archived and the folder used.
+pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<ArchiveResult> {
+    let explicit = args.dest_dir.as_ref().map(PathBuf::from);
 
     let total = args.files.len().max(1) as u32;
     let mut done: u32 = 0;
-    let mut used: HashSet<String> = HashSet::new();
+    let mut used: HashSet<PathBuf> = HashSet::new();
+    let mut dests: HashSet<PathBuf> = HashSet::new();
 
     for (i, fpath) in args.files.iter().enumerate() {
         let src = PathBuf::from(fpath);
+        let dest = explicit.clone().unwrap_or_else(|| archive_dir_for(&src));
+        fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
         let display_name = src
             .file_name()
             .and_then(|n| n.to_str())
@@ -179,7 +237,7 @@ pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<u32> {
             .to_string();
         emit_progress(
             app,
-            format!("Archiving {display_name}…"),
+            format!("Archiving {display_name} → {}…", dest.display()),
             (i as u32) * 100 / total,
         );
         let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("log");
@@ -190,20 +248,29 @@ pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<u32> {
             fs::remove_file(&src)
                 .with_context(|| format!("deleting {}", src.display()))?;
         }
+        dests.insert(dest);
         done += 1;
     }
-    Ok(done)
+    let dest_dir = if dests.len() == 1 {
+        dests
+            .into_iter()
+            .next()
+            .map(|d| d.display().to_string())
+    } else {
+        None
+    };
+    Ok(ArchiveResult { count: done, dest_dir })
 }
 
-fn unique_zip_path(dir: &Path, stem: &str, used: &mut HashSet<String>) -> PathBuf {
-    let mut name = format!("{stem}.zip");
+fn unique_zip_path(dir: &Path, stem: &str, used: &mut HashSet<PathBuf>) -> PathBuf {
+    let mut path = dir.join(format!("{stem}.zip"));
     let mut dedup = 1;
-    while used.contains(&name) || dir.join(&name).exists() {
+    while used.contains(&path) || path.exists() {
         dedup += 1;
-        name = format!("{stem}_{dedup}.zip");
+        path = dir.join(format!("{stem}_{dedup}.zip"));
     }
-    used.insert(name.clone());
-    dir.join(name)
+    used.insert(path.clone());
+    path
 }
 
 fn zip_file(src: &Path, dest_zip: &Path) -> Result<()> {
