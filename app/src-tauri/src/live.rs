@@ -9,7 +9,7 @@ use anyhow::{anyhow, Context as _, Result};
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager as _};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::watch;
 
@@ -27,6 +27,12 @@ const MAX_CHUNK_LINES: usize = 5_000;
 const MAX_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
 const LIVE_RETRY_MAX: u32 = 120;
 const LIVE_RETRY_DELAY: Duration = Duration::from_secs(30);
+/// How long to wait on stop for WoW to flush its buffered log writes before the
+/// last read. Without it the final pull's ENCOUNTER_END is often still unwritten.
+const STOP_GRACE: Duration = Duration::from_secs(3);
+/// A forced commit shorter than this is a sliver of trailing events, not a
+/// fight; uploading it adds a junk sub-second "trash" entry to the report.
+const MIN_FORCED_FIGHT_MS: i64 = 1000;
 
 #[derive(Deserialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +64,79 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+/// Append-only JSONL record of everything the live session uploads, so a
+/// misclassified report can be diffed against exactly what the client sent
+/// (fight spans, params, content hashes, retries). One file per report code
+/// under <app data>/live-journals/. Never breaks an upload: write errors are
+/// swallowed after a single stderr note.
+struct Journal {
+    path: Option<PathBuf>,
+}
+
+impl Journal {
+    fn new(app: &AppHandle, code: &str) -> Journal {
+        let path = app
+            .path()
+            .app_data_dir()
+            .ok()
+            .map(|d| d.join("live-journals"))
+            .and_then(|d| {
+                if let Err(e) = std::fs::create_dir_all(&d) {
+                    eprintln!("[live] journal dir failed: {e}");
+                    return None;
+                }
+                Some(d.join(format!("live-{code}.jsonl")))
+            });
+        if let Some(p) = &path {
+            eprintln!("[live] journal: {}", p.display());
+        }
+        Journal { path }
+    }
+
+    fn write(&self, event: &str, mut fields: Value) {
+        let Some(path) = &self.path else { return };
+        if let Some(o) = fields.as_object_mut() {
+            o.insert("event".into(), json!(event));
+            o.insert("ts".into(), json!(now_ms()));
+        }
+        let line = format!("{fields}\n");
+        let res = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+        if let Err(e) = res {
+            eprintln!("[live] journal write failed: {e}");
+        }
+    }
+}
+
+/// First and last event timestamps (report-relative ms) of a fight's
+/// eventsString, for journaling which span each upload carried.
+fn fight_span(events: &str) -> (i64, i64) {
+    let first = events
+        .split('\n')
+        .find(|l| !l.is_empty())
+        .and_then(|l| l.split('|').next())
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(-1);
+    let last = events
+        .rsplit('\n')
+        .find(|l| !l.is_empty())
+        .and_then(|l| l.split('|').next())
+        .and_then(|t| t.parse().ok())
+        .unwrap_or(-1);
+    (first, last)
+}
+
+/// Cheap content fingerprint for journal records (not cryptographic).
+fn content_hash(s: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 struct LiveProgress {
@@ -190,7 +269,20 @@ async fn run_live_session(
         parser.set_live_logging_start_time(start_ms).await?;
     }
 
-    tail_loop(args, session, parser, &code, pattern, dir, cancel, progress).await
+    let journal = Journal::new(app, &code);
+    journal.write(
+        "session_start",
+        json!({
+            "code": code,
+            "directory": args.directory,
+            "region": args.region,
+            "includeExisting": args.include_entire_file_in_report,
+            "realTime": args.enable_real_time_uploading,
+            "startMs": start_ms,
+        }),
+    );
+
+    tail_loop(args, session, parser, &code, pattern, dir, cancel, progress, &journal).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +295,7 @@ async fn tail_loop(
     dir: &Path,
     cancel: &mut watch::Receiver<bool>,
     progress: &mut LiveProgress,
+    journal: &Journal,
 ) -> Result<()> {
     let mut uploader = Uploader {
         session,
@@ -211,6 +304,7 @@ async fn tail_loop(
         args,
         segment_id: 1,
         last_master_ids: None,
+        journal,
     };
 
     let mut current_path: Option<PathBuf> = None;
@@ -259,6 +353,7 @@ async fn tail_loop(
             }
             progress.file = Some(name.clone());
             progress.emit("tailing", format!("Tailing {name}"));
+            journal.write("tail_file", json!({"file": name}));
             current_path = Some(path.clone());
             waiting_logged = false;
         }
@@ -268,11 +363,13 @@ async fn tail_loop(
             Err(e) => {
                 // transient (AV lock, file swapped out mid-read): no data this tick
                 eprintln!("[live] read error on {}: {e:#}", path.display());
+                journal.write("read_error", json!({"offset": offset, "error": format!("{e:#}")}));
                 idle_sleep(cancel).await;
                 continue;
             }
         };
         if chunk.file_size < offset {
+            journal.write("truncated", json!({"offset": offset, "fileSize": chunk.file_size}));
             offset = 0;
             progress.emit("tailing", "Log truncated — reading from the beginning");
             continue;
@@ -281,6 +378,7 @@ async fn tail_loop(
         let flush_result = if chunk.lines.is_empty() {
             if dirty && last_data.elapsed() > IDLE_THRESHOLD {
                 progress.emit("idle", "Log idle — flushing current fight");
+                journal.write("idle_flush", json!({"offset": offset}));
                 dirty = false;
                 uploader.upload_part(&[], true, cancel, progress).await
             } else {
@@ -316,10 +414,37 @@ async fn tail_loop(
         }
     }
 
+    // WoW buffers its combat-log writes, so when Stop is pressed shortly after a
+    // pull the ENCOUNTER_END is usually still unwritten. Wait for it and drain
+    // the file one last time BEFORE force-committing: a fight force-closed
+    // without its end uploads as a finalized segment with no encounter end, and
+    // WarcraftLogs demotes it to trash (boss 0, originalBoss set) instead of
+    // showing the kill/wipe.
+    progress.emit("uploading", "Stopping — waiting for final log writes...");
+    journal.write("stop", json!({"offset": offset}));
+    tokio::time::sleep(STOP_GRACE).await;
+    if let Some(path) = current_path.as_ref() {
+        loop {
+            let Ok(chunk) = read_chunk(path, offset).await else {
+                break; // file gone/locked: nothing more to drain
+            };
+            if chunk.lines.is_empty() {
+                break;
+            }
+            offset = chunk.new_offset;
+            if let Err(e) = uploader.upload_part(&chunk.lines, false, cancel, progress).await {
+                eprintln!("[live] final drain failed: {e:#}");
+                break;
+            }
+        }
+    }
+
     // final flush so an in-progress fight makes it into the report
     progress.emit("uploading", "Stopping — flushing final data...");
+    journal.write("final_flush", json!({"offset": offset}));
     if let Err(e) = uploader.upload_part(&[], true, cancel, progress).await {
         eprintln!("[live] final flush failed: {e:#}");
+        journal.write("final_flush_failed", json!({"error": format!("{e:#}")}));
     }
     Ok(())
 }
@@ -400,6 +525,25 @@ async fn read_chunk(path: &Path, offset: u64) -> Result<Chunk> {
     })
 }
 
+/// A committed batch too short or too empty to be a real fight.
+fn is_sliver(fd: &Value) -> bool {
+    let events: i64 = fd
+        .get("fights")
+        .and_then(|f| f.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|f| f.get("eventCount").and_then(|n| n.as_i64()))
+                .sum()
+        })
+        .unwrap_or(0);
+    if events == 0 {
+        return true;
+    }
+    let start = fd.get("startTime").and_then(|v| v.as_i64()).unwrap_or(0);
+    let end = fd.get("endTime").and_then(|v| v.as_i64()).unwrap_or(0);
+    end.saturating_sub(start) < MIN_FORCED_FIGHT_MS
+}
+
 fn fights_empty(v: &Value) -> bool {
     v.get("fights")
         .and_then(|f| f.as_array())
@@ -414,6 +558,7 @@ struct Uploader<'a> {
     args: LiveLogArgs,
     segment_id: i64,
     last_master_ids: Option<(i64, i64, i64, i64)>,
+    journal: &'a Journal,
 }
 
 impl Uploader<'_> {
@@ -431,6 +576,26 @@ impl Uploader<'_> {
         let mut fd = self.parser.collect_fights(push_fight).await?;
         let mut in_progress_count: i64 = 0;
         let mut uploading_in_progress = false;
+
+        // A forced commit (idle flush, stop, key end) closes whatever fragment is
+        // open. Right after a fight ends that is a handful of trailing events —
+        // uploading it lands a 1 ms "trash" fight in the report. Drop it, but
+        // still clear so it can't be re-sent later.
+        if push_fight && !fights_empty(&fd) && is_sliver(&fd) {
+            self.journal.write(
+                "sliver_dropped",
+                json!({
+                    "startTime": fd.get("startTime"),
+                    "endTime": fd.get("endTime"),
+                    "eventCounts": fd.get("fights").and_then(|f| f.as_array()).map(|a| a
+                        .iter()
+                        .map(|f| f.get("eventCount").cloned().unwrap_or(json!(0)))
+                        .collect::<Vec<_>>()),
+                }),
+            );
+            self.parser.clear_fights().await?;
+            return Ok(());
+        }
 
         if fights_empty(&fd) {
             let ip = self.parser.collect_in_progress_fight().await?;
@@ -474,7 +639,7 @@ impl Uploader<'_> {
             let game_version = fd.get("gameVersion").and_then(|v| v.as_i64()).unwrap_or(0);
             let master = wcl::build_master_string(&mi, log_version, game_version);
             let zipped = wcl::make_zip(&master)?;
-            live_retry(session, &email, &password, cancel, progress, || {
+            live_retry(session, &email, &password, cancel, progress, self.journal, || {
                 let z = zipped.clone();
                 async move {
                     session
@@ -484,15 +649,43 @@ impl Uploader<'_> {
                 }
             })
             .await?;
+            self.journal.write(
+                "master_upload",
+                json!({
+                    "segmentId": segment_id,
+                    "isRealTime": is_real_time,
+                    "masterIds": [master_ids.0, master_ids.1, master_ids.2, master_ids.3],
+                }),
+            );
             self.last_master_ids = Some(master_ids);
         }
 
         let start_time = fd.get("startTime").and_then(|v| v.as_i64()).unwrap_or(0);
         let end_time = fd.get("endTime").and_then(|v| v.as_i64()).unwrap_or(0);
         let mythic = fd.get("mythic").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        // journal: per-fight spans + counts, so a demoted report can be diffed
+        // against exactly what was sent
+        let fight_meta: Vec<Value> = fd
+            .get("fights")
+            .and_then(|f| f.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|f| {
+                        let ev = f.get("eventsString").and_then(|s| s.as_str()).unwrap_or("");
+                        let (first, last) = fight_span(ev);
+                        json!({
+                            "events": f.get("eventCount"),
+                            "firstTs": first,
+                            "lastTs": last,
+                            "hash": content_hash(ev),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let fights_str = wcl::build_fights_string(&fd);
         let zipped = wcl::make_zip(&fights_str)?;
-        let next = live_retry(session, &email, &password, cancel, progress, || {
+        let next = live_retry(session, &email, &password, cancel, progress, self.journal, || {
             let z = zipped.clone();
             async move {
                 session
@@ -511,6 +704,22 @@ impl Uploader<'_> {
             }
         })
         .await?;
+        self.journal.write(
+            "segment_upload",
+            json!({
+                "segmentId": segment_id,
+                "nextSegmentId": next,
+                "startTime": start_time,
+                "endTime": end_time,
+                "mythic": mythic,
+                "isRealTime": is_real_time,
+                "inProgressEventCount": in_progress_count,
+                "pushFight": push_fight,
+                "fights": fight_meta,
+                "blobHash": content_hash(&fights_str),
+                "blobBytes": fights_str.len(),
+            }),
+        );
         if next > 0 {
             // in-progress segments come back with 0 and get overwritten in place
             self.segment_id = next;
@@ -530,6 +739,7 @@ async fn live_retry<T, F, Fut>(
     password: &str,
     cancel: &mut watch::Receiver<bool>,
     progress: &LiveProgress,
+    journal: &Journal,
     f: F,
 ) -> Result<T>
 where
@@ -549,6 +759,10 @@ where
                     .downcast_ref::<wcl::HttpStatus>()
                     .map(|s| s.0 == 401)
                     .unwrap_or(false);
+                journal.write(
+                    "upload_retry",
+                    json!({"attempt": attempt, "unauthorized": unauthorized, "error": format!("{e:#}")}),
+                );
                 if unauthorized {
                     let _ = session.login(email, password).await;
                     tokio::select! {
