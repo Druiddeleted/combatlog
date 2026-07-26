@@ -311,6 +311,14 @@ async fn tail_loop(
     let mut offset: u64 = 0;
     let mut last_data = Instant::now();
     let mut dirty = false; // parsed lines since the last fight flush
+    // An ENCOUNTER_START has been tailed with no ENCOUNTER_END yet. WoW buffers
+    // log writes, so the file regularly goes >120s without growth right after a
+    // pull starts; an idle flush at that moment force-commits a start-only
+    // fight fragment, which WCL's live pipeline instantly demotes to trash
+    // (boss 0, originalBoss kept) and never re-evaluates even when the rest of
+    // the pull arrives. Proven live 2026-07-26 (report d1YHnMcCPK28QDFg fight
+    // 10). Never idle-flush while an encounter is open.
+    let mut encounter_open = false;
     let mut waiting_logged = false;
 
     while !cancelled(cancel) {
@@ -377,10 +385,17 @@ async fn tail_loop(
 
         let flush_result = if chunk.lines.is_empty() {
             if dirty && last_data.elapsed() > IDLE_THRESHOLD {
-                progress.emit("idle", "Log idle — flushing current fight");
-                journal.write("idle_flush", json!({"offset": offset}));
-                dirty = false;
-                uploader.upload_part(&[], true, cancel, progress).await
+                if encounter_open {
+                    // mid-pull write lull: hold the buffer until the END arrives
+                    journal.write("idle_flush_skipped", json!({"offset": offset}));
+                    last_data = Instant::now(); // re-arm instead of spinning
+                    Ok(())
+                } else {
+                    progress.emit("idle", "Log idle — flushing current fight");
+                    journal.write("idle_flush", json!({"offset": offset}));
+                    dirty = false;
+                    uploader.upload_part(&[], true, cancel, progress).await
+                }
             } else {
                 Ok(())
             }
@@ -395,10 +410,16 @@ async fn tail_loop(
             // key's end — the same collect_fights(push=true) a full upload does
             // at its batch boundaries — so the challenge finalizes with its
             // timing.
-            let key_ended = chunk
-                .lines
-                .iter()
-                .any(|l| l.contains("CHALLENGE_MODE_END"));
+            let mut key_ended = false;
+            for l in &chunk.lines {
+                if l.contains("ENCOUNTER_START") {
+                    encounter_open = true;
+                } else if l.contains("ENCOUNTER_END") {
+                    encounter_open = false;
+                } else if l.contains("CHALLENGE_MODE_END") {
+                    key_ended = true;
+                }
+            }
             uploader
                 .upload_part(&chunk.lines, key_ended, cancel, progress)
                 .await
