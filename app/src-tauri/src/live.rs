@@ -393,7 +393,8 @@ async fn tail_loop(
             continue;
         }
 
-        let flush_result = if chunk.lines.is_empty() {
+        let no_new_lines = chunk.lines.is_empty();
+        let flush_result = if no_new_lines {
             if pending_key && !encounter_open {
                 // keep retrying the key-end push until a segment uploads
                 match uploader.upload_part(&[], true, false, cancel, progress).await {
@@ -478,7 +479,7 @@ async fn tail_loop(
             }
             return Err(e);
         }
-        if chunk.lines.is_empty() {
+        if no_new_lines {
             idle_sleep(cancel).await;
         }
     }
