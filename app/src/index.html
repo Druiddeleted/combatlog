@@ -1029,7 +1029,7 @@
                   logs folder.
                 </div>
                 <label class="checkline">
-                  <input type="checkbox" id="deleteOriginals" />
+                  <input type="checkbox" id="deleteOriginals" checked />
                   <span>Delete originals after archiving</span>
                 </label>
                 <button
@@ -1689,9 +1689,9 @@
         archiveThisBtn.style.display = "none";
       }
 
-      // Archive one log to the archive folder inside its own logs folder,
-      // keeping the original. Reuses the start_archive backend but keeps the
-      // result panel (report link) visible.
+      // Archive one log: zip it into the archive folder inside its own logs
+      // folder and delete the original (archive = move). Reuses the
+      // start_archive backend but keeps the result panel (report link) visible.
       async function archiveSingle(path) {
         let unlisteners = [];
         const cleanup = () => {
@@ -1713,6 +1713,10 @@
         unlisteners.push(
           await listen("manage:done", (e) => {
             appendLog("Archived to " + (e.payload.destDir || ARCHIVE_DIR_NAME));
+            for (const f of e.payload.deleteFailed || [])
+              appendLog(
+                "Could not remove original " + f + " (still in use?) — archive copy was written.",
+              );
             statusEl.textContent = "Archived";
             archiveThisBtn.textContent = "Archived ✓";
             archiveThisBtn.disabled = true;
@@ -1729,7 +1733,7 @@
         );
         try {
           await invoke("start_archive", {
-            args: { files: [path], deleteOriginals: false },
+            args: { files: [path], deleteOriginals: true },
           });
         } catch (err) {
           showError(String(err));
@@ -2048,6 +2052,10 @@
                   (p.destDir ? " to " + p.destDir : "") +
                   ".",
               );
+              for (const f of p.deleteFailed || [])
+                appendLog(
+                  "Could not remove original " + f + " (still in use?) — archive copy was written.",
+                );
             }
             statusEl.textContent = "Complete";
             finishManageUI();

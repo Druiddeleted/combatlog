@@ -174,6 +174,9 @@ pub struct ArchiveResult {
     /// Where the logs ended up, for the UI to report. Only set when every log
     /// went to the same folder (always true for a single-folder selection).
     pub dest_dir: Option<String>,
+    /// Originals that were zipped fine but could not be deleted (typically the
+    /// active log WoW still holds open). The archive itself still succeeded.
+    pub delete_failed: Vec<String>,
 }
 
 /// The archive folder for a log: an existing `*archive*` subfolder of the log's
@@ -225,6 +228,7 @@ pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<ArchiveResult>
     let mut done: u32 = 0;
     let mut used: HashSet<PathBuf> = HashSet::new();
     let mut dests: HashSet<PathBuf> = HashSet::new();
+    let mut delete_failed: Vec<String> = Vec::new();
 
     for (i, fpath) in args.files.iter().enumerate() {
         let src = PathBuf::from(fpath);
@@ -245,8 +249,12 @@ pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<ArchiveResult>
         zip_file(&src, &zip_path)
             .with_context(|| format!("archiving {}", src.display()))?;
         if args.delete_originals {
-            fs::remove_file(&src)
-                .with_context(|| format!("deleting {}", src.display()))?;
+            if let Err(e) = fs::remove_file(&src) {
+                // zip is already safely written; don't fail the archive over a
+                // locked original (WoW keeps the active log open)
+                eprintln!("[archive] deleting {} failed: {e}", src.display());
+                delete_failed.push(display_name.clone());
+            }
         }
         dests.insert(dest);
         done += 1;
@@ -259,7 +267,7 @@ pub fn archive_logs(app: &AppHandle, args: ArchiveArgs) -> Result<ArchiveResult>
     } else {
         None
     };
-    Ok(ArchiveResult { count: done, dest_dir })
+    Ok(ArchiveResult { count: done, dest_dir, delete_failed })
 }
 
 fn unique_zip_path(dir: &Path, stem: &str, used: &mut HashSet<PathBuf>) -> PathBuf {

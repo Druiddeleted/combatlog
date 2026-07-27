@@ -278,7 +278,12 @@ async fn start_archive(app: AppHandle, args: manage::ArchiveArgs) -> Result<(), 
         Ok(res) => {
             let _ = app.emit(
                 "manage:done",
-                json!({ "kind": "archive", "count": res.count, "destDir": res.dest_dir }),
+                json!({
+                    "kind": "archive",
+                    "count": res.count,
+                    "destDir": res.dest_dir,
+                    "deleteFailed": res.delete_failed,
+                }),
             );
         }
         Err(e) => {
