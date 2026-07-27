@@ -546,23 +546,32 @@ async fn read_chunk(path: &Path, offset: u64) -> Result<Chunk> {
     })
 }
 
-/// A committed batch too short or too empty to be a real fight.
+/// A committed batch too short or too empty to be a real fight. Span is
+/// measured from the fights' own event timestamps — fd's startTime/endTime are
+/// session-global and useless for this (v0.5.8 uploaded 1-event specks because
+/// of exactly that).
 fn is_sliver(fd: &Value) -> bool {
-    let events: i64 = fd
-        .get("fights")
-        .and_then(|f| f.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|f| f.get("eventCount").and_then(|n| n.as_i64()))
-                .sum()
-        })
-        .unwrap_or(0);
+    let Some(fights) = fd.get("fights").and_then(|f| f.as_array()) else {
+        return true;
+    };
+    let events: i64 = fights
+        .iter()
+        .filter_map(|f| f.get("eventCount").and_then(|n| n.as_i64()))
+        .sum();
     if events == 0 {
         return true;
     }
-    let start = fd.get("startTime").and_then(|v| v.as_i64()).unwrap_or(0);
-    let end = fd.get("endTime").and_then(|v| v.as_i64()).unwrap_or(0);
-    end.saturating_sub(start) < MIN_FORCED_FIGHT_MS
+    let mut first = i64::MAX;
+    let mut last = i64::MIN;
+    for f in fights {
+        let ev = f.get("eventsString").and_then(|s| s.as_str()).unwrap_or("");
+        let (a, b) = fight_span(ev);
+        if a >= 0 {
+            first = first.min(a);
+            last = last.max(b);
+        }
+    }
+    first > last || last - first < MIN_FORCED_FIGHT_MS
 }
 
 fn fights_empty(v: &Value) -> bool {
