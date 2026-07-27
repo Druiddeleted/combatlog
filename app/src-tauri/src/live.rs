@@ -25,6 +25,12 @@ const IDLE_THRESHOLD: Duration = Duration::from_secs(120);
 const MAX_FILE_AGE: Duration = Duration::from_secs(6 * 3600);
 const MAX_CHUNK_LINES: usize = 5_000;
 const MAX_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+/// Per poll, keep reading until the file is exhausted or this many lines are
+/// gathered, and upload once. WoW dumps a final boss kill and the following
+/// CHALLENGE_MODE_END in one buffered burst; uploading per 5k-line chunk let
+/// the boss fight ship in one segment and the key-end land in a later one,
+/// which WCL's live pipeline never reconciles (Pit of Saron, 2026-07-26).
+const DRAIN_MAX_LINES: usize = 100_000;
 const LIVE_RETRY_MAX: u32 = 120;
 const LIVE_RETRY_DELAY: Duration = Duration::from_secs(30);
 /// How long to wait on stop for WoW to flush its buffered log writes before the
@@ -319,6 +325,10 @@ async fn tail_loop(
     // the pull arrives. Proven live 2026-07-26 (report d1YHnMcCPK28QDFg fight
     // 10). Never idle-flush while an encounter is open.
     let mut encounter_open = false;
+    // A CHALLENGE_MODE_END was tailed but no segment has been uploaded since:
+    // the parser declines to commit tiny post-key buffers, so keep forcing the
+    // push on every poll until something actually uploads.
+    let mut pending_key = false;
     let mut waiting_logged = false;
 
     while !cancelled(cancel) {
@@ -342,7 +352,7 @@ async fn tail_loop(
                         break;
                     }
                     offset = chunk.new_offset;
-                    if let Err(e) = uploader.upload_part(&chunk.lines, false, cancel, progress).await {
+                    if let Err(e) = uploader.upload_part(&chunk.lines, false, false, cancel, progress).await {
                         if cancelled(cancel) {
                             break; // stop requested mid-retry: fall through to final flush
                         }
@@ -384,7 +394,18 @@ async fn tail_loop(
         }
 
         let flush_result = if chunk.lines.is_empty() {
-            if dirty && last_data.elapsed() > IDLE_THRESHOLD {
+            if pending_key && !encounter_open {
+                // keep retrying the key-end push until a segment uploads
+                match uploader.upload_part(&[], true, false, cancel, progress).await {
+                    Ok(uploaded) => {
+                        if uploaded {
+                            pending_key = false;
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            } else if dirty && last_data.elapsed() > IDLE_THRESHOLD {
                 if encounter_open {
                     // mid-pull write lull: hold the buffer until the END arrives
                     journal.write("idle_flush_skipped", json!({"offset": offset}));
@@ -394,24 +415,36 @@ async fn tail_loop(
                     progress.emit("idle", "Log idle — flushing current fight");
                     journal.write("idle_flush", json!({"offset": offset}));
                     dirty = false;
-                    uploader.upload_part(&[], true, cancel, progress).await
+                    uploader.upload_part(&[], true, true, cancel, progress).await.map(|_| ())
                 }
             } else {
                 Ok(())
             }
         } else {
+            // Drain everything already on disk before uploading, so events WoW
+            // wrote in one burst (boss END + CHALLENGE_MODE_END) can't be split
+            // across segments by the per-read line cap.
+            let mut lines = chunk.lines;
             offset = chunk.new_offset;
+            while lines.len() < DRAIN_MAX_LINES {
+                match read_chunk(&path, offset).await {
+                    Ok(more) if !more.lines.is_empty() => {
+                        offset = more.new_offset;
+                        lines.extend(more.lines);
+                    }
+                    _ => break,
+                }
+            }
             last_data = Instant::now();
             dirty = true;
             // A boss ENCOUNTER_END auto-commits as a fight, so normal push=false
             // tailing catches it. A Mythic+ CHALLENGE_MODE_END does NOT
             // auto-commit, so without a push the run never finalizes and WCL
             // shows the key uncompleted. Force-commit on the chunk carrying the
-            // key's end — the same collect_fights(push=true) a full upload does
-            // at its batch boundaries — so the challenge finalizes with its
-            // timing.
+            // key's end — and keep forcing (pending_key) until a segment truly
+            // uploads, because the parser declines to commit tiny buffers.
             let mut key_ended = false;
-            for l in &chunk.lines {
+            for l in &lines {
                 if l.contains("ENCOUNTER_START") {
                     encounter_open = true;
                 } else if l.contains("ENCOUNTER_END") {
@@ -420,9 +453,24 @@ async fn tail_loop(
                     key_ended = true;
                 }
             }
-            uploader
-                .upload_part(&chunk.lines, key_ended, cancel, progress)
+            if key_ended {
+                pending_key = true;
+            }
+            // never force while a newer encounter is open — a forced commit
+            // would split it (the demotion bug all over again)
+            let force = (key_ended || pending_key) && !encounter_open;
+            match uploader
+                .upload_part(&lines, force, false, cancel, progress)
                 .await
+            {
+                Ok(uploaded) => {
+                    if uploaded {
+                        pending_key = false;
+                    }
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
         };
         if let Err(e) = flush_result {
             if cancelled(cancel) {
@@ -453,7 +501,7 @@ async fn tail_loop(
                 break;
             }
             offset = chunk.new_offset;
-            if let Err(e) = uploader.upload_part(&chunk.lines, false, cancel, progress).await {
+            if let Err(e) = uploader.upload_part(&chunk.lines, false, false, cancel, progress).await {
                 eprintln!("[live] final drain failed: {e:#}");
                 break;
             }
@@ -463,7 +511,7 @@ async fn tail_loop(
     // final flush so an in-progress fight makes it into the report
     progress.emit("uploading", "Stopping — flushing final data...");
     journal.write("final_flush", json!({"offset": offset}));
-    if let Err(e) = uploader.upload_part(&[], true, cancel, progress).await {
+    if let Err(e) = uploader.upload_part(&[], true, true, cancel, progress).await {
         eprintln!("[live] final flush failed: {e:#}");
         journal.write("final_flush_failed", json!({"error": format!("{e:#}")}));
     }
@@ -592,14 +640,19 @@ struct Uploader<'a> {
 }
 
 impl Uploader<'_> {
-    /// mirror of Archon's uploadFilePart.
+    /// mirror of Archon's uploadFilePart. Returns whether a segment was
+    /// actually uploaded (the parser declines to commit tiny buffers, so a
+    /// push is not a guarantee). `drop_slivers` suppresses sub-second forced
+    /// commits — must be false for key-end pushes, whose CHALLENGE_MODE_END
+    /// fragment is itself sub-second (Magisters' Terrace's was 0.6s).
     async fn upload_part(
         &mut self,
         lines: &[String],
         push_fight: bool,
+        drop_slivers: bool,
         cancel: &mut watch::Receiver<bool>,
         progress: &mut LiveProgress,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if !lines.is_empty() {
             self.parser.parse_lines(lines, self.args.region).await?;
         }
@@ -611,7 +664,7 @@ impl Uploader<'_> {
         // open. Right after a fight ends that is a handful of trailing events —
         // uploading it lands a 1 ms "trash" fight in the report. Drop it, but
         // still clear so it can't be re-sent later.
-        if push_fight && !fights_empty(&fd) && is_sliver(&fd) {
+        if push_fight && drop_slivers && !fights_empty(&fd) && is_sliver(&fd) {
             self.journal.write(
                 "sliver_dropped",
                 json!({
@@ -624,7 +677,7 @@ impl Uploader<'_> {
                 }),
             );
             self.parser.clear_fights().await?;
-            return Ok(());
+            return Ok(false);
         }
 
         if fights_empty(&fd) {
@@ -637,7 +690,7 @@ impl Uploader<'_> {
                 }
             }
             if !self.args.enable_real_time_uploading || !has_in_progress {
-                return Ok(());
+                return Ok(false);
             }
             in_progress_count = ip
                 .get("fights")
@@ -757,7 +810,7 @@ impl Uploader<'_> {
             progress.emit("uploading", format!("Uploaded segment {}", progress.segments));
         }
         self.parser.clear_fights().await?;
-        Ok(())
+        Ok(true)
     }
 }
 
