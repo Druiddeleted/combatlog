@@ -325,6 +325,15 @@ async fn tail_loop(
     // the pull arrives. Proven live 2026-07-26 (report d1YHnMcCPK28QDFg fight
     // 10). Never idle-flush while an encounter is open.
     let mut encounter_open = false;
+    // A keystone run is open (CHALLENGE_MODE_START tailed, no END yet). The
+    // parser holds the whole key as ONE fight; an idle flush mid-run chops it
+    // across segments, and WCL's live pipeline locks the key on the first
+    // chop and never re-evaluates — the run shows unfinished even though the
+    // CHALLENGE_MODE_END uploads promptly (Pit of Saron 07-26, Magisters' +
+    // Windrunner 07-28; chopped-but-fast replays stitch fine, so it is the
+    // same append-without-reclassify server behavior as raid demotions).
+    // Hold like an open encounter; the run commits whole at its END.
+    let mut key_open = false;
     // A CHALLENGE_MODE_END was tailed but no segment has been uploaded since:
     // the parser declines to commit tiny post-key buffers, so keep forcing the
     // push on every poll until something actually uploads.
@@ -395,7 +404,7 @@ async fn tail_loop(
 
         let no_new_lines = chunk.lines.is_empty();
         let flush_result = if no_new_lines {
-            if pending_key && !encounter_open {
+            if pending_key && !encounter_open && !key_open {
                 // keep retrying the key-end push until a segment uploads
                 match uploader.upload_part(&[], true, false, cancel, progress).await {
                     Ok(uploaded) => {
@@ -407,9 +416,12 @@ async fn tail_loop(
                     Err(e) => Err(e),
                 }
             } else if dirty && last_data.elapsed() > IDLE_THRESHOLD {
-                if encounter_open {
-                    // mid-pull write lull: hold the buffer until the END arrives
-                    journal.write("idle_flush_skipped", json!({"offset": offset}));
+                if encounter_open || key_open {
+                    // mid-pull / mid-key write lull: hold until the END arrives
+                    journal.write(
+                        "idle_flush_skipped",
+                        json!({"offset": offset, "encounterOpen": encounter_open, "keyOpen": key_open}),
+                    );
                     last_data = Instant::now(); // re-arm instead of spinning
                     Ok(())
                 } else {
@@ -450,7 +462,11 @@ async fn tail_loop(
                     encounter_open = true;
                 } else if l.contains("ENCOUNTER_END") {
                     encounter_open = false;
+                } else if l.contains("CHALLENGE_MODE_START") {
+                    key_open = true;
                 } else if l.contains("CHALLENGE_MODE_END") {
+                    // both real completions and abandon/reset markers close it
+                    key_open = false;
                     key_ended = true;
                 }
             }
@@ -459,7 +475,7 @@ async fn tail_loop(
             }
             // never force while a newer encounter is open — a forced commit
             // would split it (the demotion bug all over again)
-            let force = (key_ended || pending_key) && !encounter_open;
+            let force = (key_ended || pending_key) && !encounter_open && !key_open;
             match uploader
                 .upload_part(&lines, force, false, cancel, progress)
                 .await
